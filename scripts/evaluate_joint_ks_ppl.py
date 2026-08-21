@@ -333,6 +333,14 @@ def capture_first_layer_inputs(
 
     layers[0] = Catcher(original_layer)
     model.model.embed_tokens = model.model.embed_tokens.to(device)
+    # Llama 3.1 computes the shared RoPE cos/sin values in LlamaModel before
+    # entering the first decoder layer.  The layer-wise evaluator keeps the
+    # full model on CPU, so move this small buffer/module alongside the token
+    # embeddings while capturing the first-layer inputs.  Otherwise
+    # position_ids is on CUDA while rotary_emb.inv_freq remains on CPU.
+    rotary_emb = getattr(model.model, "rotary_emb", None)
+    if rotary_emb is not None:
+        rotary_emb.to(device)
     try:
         for index in range(windows):
             batch = token_ids[
@@ -346,6 +354,8 @@ def capture_first_layer_inputs(
     finally:
         layers[0] = original_layer
         model.model.embed_tokens = model.model.embed_tokens.cpu()
+        if rotary_emb is not None:
+            rotary_emb.cpu()
         torch.cuda.empty_cache()
     if cache["index"] != windows:
         raise AssertionError(f"Captured {cache['index']} of {windows} windows")
