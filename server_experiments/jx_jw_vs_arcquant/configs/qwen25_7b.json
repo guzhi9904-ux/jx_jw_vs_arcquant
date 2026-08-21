@@ -34,5 +34,31 @@
     "seqlen": 2048,
     "max_windows": 0,
     "checkpoint_every": 7
+  },
+  "tasks": {
+    "baseline_methods": [
+      "bf16",
+      "rtn_identity",
+      "paper_reorder_arc"
+    ],
+    "dual_method": "proxy_fixed_half",
+    "dual_seeds": [0],
+    "diagnostic_methods": [
+      "proxy_shared"
+    ],
+    "zero_shot_tasks": [
+      "arc_challenge",
+      "hellaswag",
+      "lambada_openai",
+      "piqa",
+      "winogrande"
+    ],
+    "mmlu_task": "mmlu",
+    "mmlu_num_fewshot": 5,
+    "limit": 0,
+    "zero_shot_batch_size": "auto",
+    "mmlu_batch_size": "2",
+    "max_batch_size": 64,
+    "bootstrap_iters": 0
   }
 }

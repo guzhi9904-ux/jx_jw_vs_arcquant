@@ -181,7 +181,7 @@ export CUDA_VISIBLE_DEVICES=0
 cd /data/jx_jw_vs_arcquant
 ```
 
-推荐分四个阶段运行。这样每一步完成后都能先检查结果，服务器中断时也容易续跑。
+推荐分五个阶段运行。这样每一步完成后都能先检查结果，服务器中断时也容易续跑。下游任务阶段首次需要联网下载 lm-eval 数据，因此不塞进 `--stage all`。
 
 ### 阶段 A：128×2048 全量校准
 
@@ -231,7 +231,34 @@ python server_experiments/jx_jw_vs_arcquant/run_server.py \
   --offline --device cuda:0 --resume --stage ppl --with-ppl-diagnostics
 ```
 
-### 阶段 D：汇总
+### 阶段 D：论文对齐的下游任务
+
+固定口径是 ARC-Challenge、HellaSwag、LAMBADA、PIQA、Winogrande zero-shot，以及 MMLU 5-shot。第一次先让 lm-eval 下载数据并做 smoke：
+
+```bash
+python server_experiments/jx_jw_vs_arcquant/run_server.py \
+  --config server_experiments/jx_jw_vs_arcquant/configs/qwen25_7b.json \
+  --model /data/models/Qwen2.5-7B \
+  --run-dir /data/arcquant_runs/qwen25_7b \
+  --wikitext-cache-dir /data/datasets/wikitext2_arrow \
+  --offline --device cuda:0 --resume --stage tasks \
+  --task-limit 2 --allow-task-downloads
+```
+
+`--task-limit 2` 表示每个任务最多 2 条；MMLU 包含许多子任务，因此 smoke 仍会运行每个子任务，结果只验证流程，不能进论文。数据下载进前面设置的持久化 `HF_HOME` 后，再跑完整主比较：
+
+```bash
+python server_experiments/jx_jw_vs_arcquant/run_server.py \
+  --config server_experiments/jx_jw_vs_arcquant/configs/qwen25_7b.json \
+  --model /data/models/Qwen2.5-7B \
+  --run-dir /data/arcquant_runs/qwen25_7b \
+  --wikitext-cache-dir /data/datasets/wikitext2_arrow \
+  --offline --device cuda:0 --resume --stage tasks --task-limit 0
+```
+
+默认比较 BF16、普通 RTN、论文 `reorder + ARC` 和 seed 0 独立 `J_X/J_W`。只有 seed 0 的结论稳定后，才用 `--task-seeds 0,1,2,3,4` 跑独立方法的多 seed；共享 `J` 用 `--with-task-diagnostics` 单独补跑。
+
+### 阶段 E：汇总
 
 ```bash
 python server_experiments/jx_jw_vs_arcquant/run_server.py \
@@ -242,7 +269,7 @@ python server_experiments/jx_jw_vs_arcquant/run_server.py \
   --offline --device cuda:0 --resume --stage aggregate
 ```
 
-也可以用 `--stage all` 一次跑完，但分阶段更容易核查。
+`--stage all` 会完成校准、局部实验、PPL 和汇总，但有意不自动启动下游任务。下游任务完成后再单独执行一次 `--stage aggregate`，把任务结果写进总报告。
 
 ## 9. 中断后怎么续跑
 
@@ -251,6 +278,7 @@ python server_experiments/jx_jw_vs_arcquant/run_server.py \
 - 完成的整个阶段会跳过；
 - 局部实验会按已完成的 module 继续；
 - PPL 会按 layer checkpoint 继续；
+- 下游任务会分别复用已经完成的 zero-shot 或 MMLU 原始 JSON；
 - 不要删除原来的 `RUN_DIR`，也不要换模型目录。
 
 查看进度：
@@ -276,6 +304,8 @@ tmux attach -t qwen_arc
 /data/arcquant_runs/qwen25_7b/summary/local_strategy_aggregate.csv
 /data/arcquant_runs/qwen25_7b/summary/local_key_comparisons.csv
 /data/arcquant_runs/qwen25_7b/summary/ppl_aggregate.csv
+/data/arcquant_runs/qwen25_7b/summary/tasks_aggregate.csv
+/data/arcquant_runs/qwen25_7b/summary/tasks_task_metrics.csv
 ```
 
 原始结果还包括每个 seed 的选择索引、每层 output-SSE 和每次 PPL 的 JSON。`run_manifest.json` 会记录配置、模型路径、软件版本和 Git 状态，回传结果时不要漏掉。
@@ -297,7 +327,7 @@ Qwen 全流程确认无误后，再把模型、配置和运行目录替换为：
 结果：/data/arcquant_runs/llama31_8b
 ```
 
-其余 `preflight → quick → calibrate → local → ppl → aggregate` 流程完全相同。单张 5090 上不要同时跑 Qwen 和 Llama。
+其余 `preflight → quick → calibrate → local → ppl → tasks → aggregate` 流程完全相同。单张 5090 上不要同时跑 Qwen 和 Llama。
 
 ## 12. 时间和资源预期
 
@@ -307,7 +337,8 @@ Qwen 全流程确认无误后，再把模型、配置和运行目录替换为：
 - 128×2048 校准：约 2–6 小时；
 - 5 seed 局部消融：约 2–6 小时；
 - 默认 8 次完整 PPL：约 8–20 小时；
-- 单模型合计：约 12–30 小时。
+- 下游任务主比较：强烈依赖模型和 lm-eval 批大小，建议先用 limit smoke 实测后再估租期；
+- 不含下游任务的单模型合计：约 12–30 小时。
 
 这是保守估算，不是性能承诺。先记录 quick 和校准前几层的实际速度，再决定续租时长。CPU 内存不足会比 GPU 算力更早成为问题，因此宁可多租内存，也不要为了省钱选 32 GB 系统内存。
 
@@ -319,6 +350,7 @@ Qwen 全流程确认无误后，再把模型、配置和运行目录替换为：
 - 找不到 WikiText Arrow：重新运行 `prepare_wikitext2_cache.py`，不要把 Hugging Face 的内部 cache 目录直接当成这里需要的固定 Arrow 目录。
 - Llama 下载 401/403：先在模型页面接受许可，再执行 `huggingface-cli login`。
 - 离线模式找不到模型：检查传入的是完整本地目录，且 tokenizer、config 和所有权重 shard 都已下载。
+- `tasks` 阶段第一次提示找不到数据集：确认 `HF_HOME` 指向持久化磁盘，并在第一次命令中加入 `--allow-task-downloads`；后续可恢复离线运行。
 - 结果目录已经有另一模型的数据：换一个全新的 `RUN_DIR`，不要混写。
 
 ## 14. 官方环境依据

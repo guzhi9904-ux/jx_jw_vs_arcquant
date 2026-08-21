@@ -1,4 +1,4 @@
-"""Aggregate local output-SSE and end-to-end PPL server results."""
+"""Aggregate local output-SSE, PPL, and downstream-task server results."""
 
 from __future__ import annotations
 
@@ -11,6 +11,10 @@ import pandas as pd
 
 
 FRIENDLY = {
+    "bf16": "BF16",
+    "rtn_identity": "普通 RTN",
+    "proxy_fixed_half": "独立 J_X/J_W（各 S/2）",
+    "proxy_shared": "共享 J（同一通道双残差）",
     "paper_reorder_arc": "论文 reorder + ARC",
     "proxy_fixed_half_train": "独立 J_X/J_W（各 S/2）",
     "proxy_shared_train": "共享 J（同一通道双残差）",
@@ -41,6 +45,10 @@ def percent(value: float | None) -> str:
 
 def ppl_text(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4f}"
+
+
+def accuracy_text(value: float | None) -> str:
+    return "n/a" if value is None else f"{100.0 * value:.2f}%"
 
 
 def main() -> None:
@@ -133,6 +141,75 @@ def main() -> None:
         )
         ppl_aggregate.to_csv(summary_dir / "ppl_aggregate.csv", index=False)
 
+    task_rows: list[dict] = []
+    task_metric_rows: list[dict] = []
+    for path in sorted((run_dir / "tasks").glob("**/result_tasks_*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("status") != "completed":
+            continue
+        row = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"task_metrics", "environment"}
+        }
+        row["result_file"] = str(path.resolve())
+        row["scope"] = path.parent.name
+        row["method_cn"] = FRIENDLY.get(payload["method"], payload["method"])
+        for task, metric in payload.get("task_metrics", {}).items():
+            row[f"task_{task}"] = metric["value"]
+            task_metric_rows.append(
+                {
+                    "method": payload["method"],
+                    "method_cn": row["method_cn"],
+                    "selection_seed": payload.get("selection_seed"),
+                    "task": task,
+                    "metric": metric["metric"],
+                    "value": metric["value"],
+                    "num_fewshot": metric.get("num_fewshot", 0),
+                    "full_evaluation": payload.get("full_evaluation"),
+                    "limit": payload.get("limit"),
+                    "result_file": str(path.resolve()),
+                }
+            )
+        task_rows.append(row)
+
+    task_frame = pd.DataFrame(task_rows)
+    task_aggregate = pd.DataFrame()
+    if not task_frame.empty:
+        task_frame.to_csv(summary_dir / "tasks_runs.csv", index=False)
+        pd.DataFrame(task_metric_rows).to_csv(
+            summary_dir / "tasks_task_metrics.csv", index=False
+        )
+        metric_columns = [
+            "paper_zero_shot_average",
+            "mmlu_5shot_accuracy",
+            *sorted(
+                column for column in task_frame.columns if column.startswith("task_")
+            ),
+        ]
+        aggregation: dict[str, tuple[str, str]] = {
+            "runs": ("method", "count"),
+        }
+        for column in metric_columns:
+            if column not in task_frame:
+                continue
+            aggregation[f"{column}_mean"] = (column, "mean")
+            aggregation[f"{column}_std"] = (column, "std")
+            aggregation[f"{column}_min"] = (column, "min")
+            aggregation[f"{column}_max"] = (column, "max")
+        task_aggregate = (
+            task_frame.groupby(
+                ["method", "method_cn", "full_evaluation", "limit"],
+                as_index=False,
+            )
+            .agg(**aggregation)
+            .fillna(0.0)
+            .sort_values("paper_zero_shot_average_mean", ascending=False)
+        )
+        task_aggregate.to_csv(
+            summary_dir / "tasks_aggregate.csv", index=False
+        )
+
     def local_value(strategy: str) -> float | None:
         if local_aggregate.empty:
             return None
@@ -144,6 +221,15 @@ def main() -> None:
             return None
         rows = ppl_aggregate[ppl_aggregate.method == method]
         return None if rows.empty else float(rows.iloc[0].perplexity_mean)
+
+    def task_value(method: str, column: str) -> float | None:
+        if task_aggregate.empty:
+            return None
+        rows = task_aggregate[
+            (task_aggregate.method == method)
+            & (task_aggregate.full_evaluation == True)  # noqa: E712
+        ]
+        return None if rows.empty else float(rows.iloc[0][column])
 
     independent_shared_delta = (
         None
@@ -167,9 +253,20 @@ def main() -> None:
 - 论文 `reorder + ARC`：{ppl_text(ppl_value('paper_reorder_arc'))}
 - 独立 `J_X/J_W`（多 seed 均值）：{ppl_text(ppl_value('proxy_fixed_half'))}
 
+## 论文对齐下游任务
+
+- BF16 五任务 zero-shot 平均：{accuracy_text(task_value('bf16', 'paper_zero_shot_average_mean'))}
+- 普通 RTN 五任务 zero-shot 平均：{accuracy_text(task_value('rtn_identity', 'paper_zero_shot_average_mean'))}
+- 论文 `reorder + ARC` 五任务 zero-shot 平均：{accuracy_text(task_value('paper_reorder_arc', 'paper_zero_shot_average_mean'))}
+- 独立 `J_X/J_W` 五任务 zero-shot 平均：{accuracy_text(task_value('proxy_fixed_half', 'paper_zero_shot_average_mean'))}
+- BF16 MMLU 5-shot：{accuracy_text(task_value('bf16', 'mmlu_5shot_accuracy_mean'))}
+- 普通 RTN MMLU 5-shot：{accuracy_text(task_value('rtn_identity', 'mmlu_5shot_accuracy_mean'))}
+- 论文 `reorder + ARC` MMLU 5-shot：{accuracy_text(task_value('paper_reorder_arc', 'mmlu_5shot_accuracy_mean'))}
+- 独立 `J_X/J_W` MMLU 5-shot：{accuracy_text(task_value('proxy_fixed_half', 'mmlu_5shot_accuracy_mean'))}
+
 ## 口径
 
-局部百分比表示相对普通 RTN output SSE 恢复了多少，越大越好；PPL 越小越好。局部 oracle 只用于看简单统计分数离上限还有多远，不是可部署算法。所有 W4A4 数值结果使用仓库统一的 fake NVFP4 后端，不代表真实 kernel 延迟。
+局部百分比表示相对普通 RTN output SSE 恢复了多少，越大越好；PPL 越小越好。下游五任务平均严格使用 ARC-Challenge、HellaSwag、LAMBADA、PIQA、Winogrande 的论文指标；MMLU 使用 5-shot。汇总表会保留 smoke 行供排错，但上面的正式结论只读取 `full_evaluation=true` 的结果。局部 oracle 只用于看简单统计分数离上限还有多远，不是可部署算法。所有 W4A4 数值结果使用仓库统一的 fake NVFP4 后端，不代表真实 kernel 延迟。
 """
     (summary_dir / "REPORT.md").write_text(report, encoding="utf-8")
     print(report)

@@ -25,6 +25,7 @@ QUANTIZE_SCRIPT = REPO_ROOT / "model" / "quantize.py"
 KV_CACHE_SCRIPT = REPO_ROOT / "model" / "kv_cache.py"
 LOCAL_SCRIPT = REPO_ROOT / "scripts" / "analyze_proxy_joint_ks_holdout.py"
 PPL_SCRIPT = REPO_ROOT / "scripts" / "evaluate_joint_ks_ppl.py"
+TASK_SCRIPT = REPO_ROOT / "scripts" / "evaluate_joint_ks_tasks.py"
 SPLIT_VALIDATOR = REPO_ROOT / "scripts" / "validate_proxy_split_disjoint.py"
 SEED_VALIDATOR = BUNDLE_ROOT / "validate_seed.py"
 AGGREGATOR = BUNDLE_ROOT / "aggregate_results.py"
@@ -34,7 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run full ARC calibration, local output-SSE comparisons, and "
-            "WikiText2 PPL from an isolated server run directory."
+            "WikiText2 PPL and paper-aligned downstream tasks from an "
+            "isolated server run directory."
         )
     )
     parser.add_argument("--config", required=True)
@@ -45,7 +47,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir")
     parser.add_argument(
         "--stage",
-        choices=("preflight", "calibrate", "local", "ppl", "aggregate", "all"),
+        choices=(
+            "preflight",
+            "calibrate",
+            "local",
+            "ppl",
+            "tasks",
+            "aggregate",
+            "all",
+        ),
         default="all",
     )
     parser.add_argument("--device", default="cuda:0")
@@ -59,8 +69,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seeds", help="Override local seeds, e.g. 0,1,2,3,4")
     parser.add_argument("--ppl-seeds", help="Override J_X/J_W PPL seeds")
+    parser.add_argument("--task-seeds", help="Override J_X/J_W downstream seeds")
     parser.add_argument("--max-windows", type=int)
+    parser.add_argument(
+        "--task-limit",
+        type=int,
+        help="0 runs full tasks; a positive value is smoke-only per task.",
+    )
     parser.add_argument("--with-ppl-diagnostics", action="store_true")
+    parser.add_argument("--with-task-diagnostics", action="store_true")
+    parser.add_argument(
+        "--allow-task-downloads",
+        action="store_true",
+        help=(
+            "Unset Hugging Face offline flags only for the downstream-task "
+            "subprocess so lm-eval can populate its persistent dataset cache."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -88,13 +113,16 @@ def parse_int_list(raw: str | None, fallback: list[int]) -> list[int]:
     return values
 
 
-def completed_json(path: Path) -> bool:
+def completed_json(path: Path, expected: dict[str, Any] | None = None) -> bool:
     if not path.is_file():
         return False
     try:
-        return read_json(path).get("status") == "completed"
+        payload = read_json(path)
     except (OSError, json.JSONDecodeError):
         return False
+    if payload.get("status") != "completed":
+        return False
+    return expected is None or all(payload.get(key) == value for key, value in expected.items())
 
 
 def display_command(command: list[str]) -> str:
@@ -192,6 +220,14 @@ def apply_quick_overrides(config: dict[str, Any]) -> None:
             "checkpoint_every": 0,
         }
     )
+    if "tasks" in config:
+        config["tasks"].update(
+            {
+                "dual_seeds": [config["local"]["seeds"][0]],
+                "limit": 2,
+                "bootstrap_iters": 0,
+            }
+        )
 
 
 def preflight(
@@ -212,6 +248,7 @@ def preflight(
             KV_CACHE_SCRIPT,
             LOCAL_SCRIPT,
             PPL_SCRIPT,
+            TASK_SCRIPT,
             SPLIT_VALIDATOR,
             SEED_VALIDATOR,
             AGGREGATOR,
@@ -230,6 +267,7 @@ def preflight(
         KV_CACHE_SCRIPT: ("except (ImportError, OSError)",),
         LOCAL_SCRIPT: ("server-comparison", "SERVER_COMPARISON_STRATEGIES"),
         PPL_SCRIPT: ("Selection/model module mismatch",),
+        TASK_SCRIPT: ("DEFAULT_ZERO_SHOT_TASKS", "lm-eval==0.4.8"),
     }
     stale_sources = []
     for path, markers in source_contracts.items():
@@ -349,14 +387,27 @@ def main() -> None:
     ppl_seeds = parse_int_list(
         args.ppl_seeds, list(config["ppl"]["dual_seeds"])
     )
+    task_config = config.get("tasks", {})
+    task_seeds = parse_int_list(
+        args.task_seeds,
+        list(task_config.get("dual_seeds", [local_seeds[0]])),
+    )
     if args.quick:
         local_seeds = local_seeds[:1]
         ppl_seeds = ppl_seeds[:1]
+        task_seeds = task_seeds[:1]
     max_windows = (
         args.max_windows
         if args.max_windows is not None
         else int(config["ppl"]["max_windows"])
     )
+    task_limit = (
+        args.task_limit
+        if args.task_limit is not None
+        else int(task_config.get("limit", 0))
+    )
+    if task_limit < 0:
+        raise ValueError("--task-limit must be 0 (full) or positive (smoke)")
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -378,6 +429,7 @@ def main() -> None:
         "device": args.device,
         "local_seeds": local_seeds,
         "ppl_seeds": ppl_seeds,
+        "task_seeds": task_seeds,
         "quick": args.quick,
         "offline": args.offline or cache_dir is not None,
         "git": git_snapshot(),
@@ -440,7 +492,7 @@ def main() -> None:
         if args.stage == "calibrate":
             return
 
-    if args.stage in {"local", "ppl", "all"} and not args.dry_run:
+    if args.stage in {"local", "ppl", "tasks", "all"} and not args.dry_run:
         for required in (reorder_path, select_path):
             if not required.is_file():
                 raise FileNotFoundError(
@@ -604,6 +656,128 @@ def main() -> None:
                 )
         if args.stage == "ppl":
             return
+
+    if args.stage == "tasks":
+        if not task_config:
+            raise ValueError("Config is missing the required tasks section")
+        first_selection = (
+            run_dir / "local" / f"seed_{local_seeds[0]}" / "selection_indices.pt"
+        )
+        task_env = env.copy()
+        if args.allow_task_downloads:
+            for name in (
+                "HF_DATASETS_OFFLINE",
+                "HF_HUB_OFFLINE",
+                "TRANSFORMERS_OFFLINE",
+            ):
+                task_env.pop(name, None)
+
+        def run_tasks(
+            method: str,
+            output_dir: Path,
+            selection_path: Path,
+            selection_seed: int | None,
+        ) -> None:
+            result_path = output_dir / f"result_tasks_{method}.json"
+            expected_result = {
+                "method": method,
+                "selection_seed": selection_seed,
+                "zero_shot_tasks": list(task_config["zero_shot_tasks"]),
+                "mmlu_task": str(task_config["mmlu_task"]),
+                "mmlu_num_fewshot": int(task_config["mmlu_num_fewshot"]),
+                "limit": task_limit,
+            }
+            if args.resume and completed_json(result_path, expected_result):
+                print(
+                    f"Skipping completed downstream tasks: {method} in {output_dir}",
+                    flush=True,
+                )
+                return
+            command = [
+                sys.executable,
+                str(TASK_SCRIPT),
+                "--model",
+                str(model_path),
+                "--saved-dir",
+                str(artifact_dir),
+                "--selection-indices",
+                str(selection_path),
+                "--output-dir",
+                str(output_dir),
+                "--method",
+                method,
+                "--metric",
+                str(calibration["metric"]),
+                "--device",
+                args.device,
+                "--zero-shot-tasks",
+                ",".join(task_config["zero_shot_tasks"]),
+                "--mmlu-task",
+                str(task_config["mmlu_task"]),
+                "--mmlu-num-fewshot",
+                str(task_config["mmlu_num_fewshot"]),
+                "--limit",
+                str(task_limit),
+                "--zero-shot-batch-size",
+                str(task_config["zero_shot_batch_size"]),
+                "--mmlu-batch-size",
+                str(task_config["mmlu_batch_size"]),
+                "--max-batch-size",
+                str(task_config["max_batch_size"]),
+                "--bootstrap-iters",
+                str(task_config.get("bootstrap_iters", 0)),
+            ]
+            if selection_seed is not None:
+                command.extend(["--selection-seed", str(selection_seed)])
+            if args.resume:
+                command.append("--resume")
+            run_command(
+                command,
+                log_path=(
+                    run_dir / "logs" / f"tasks_{output_dir.name}_{method}.log"
+                ),
+                env=task_env,
+                dry_run=args.dry_run,
+            )
+
+        for method in task_config["baseline_methods"]:
+            run_tasks(
+                str(method),
+                run_dir / "tasks" / "baselines",
+                first_selection,
+                None,
+            )
+        for seed in task_seeds:
+            selection_path = (
+                run_dir / "local" / f"seed_{seed}" / "selection_indices.pt"
+            )
+            if not args.dry_run and not selection_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing J_X/J_W selection for task seed {seed}: "
+                    f"{selection_path}"
+                )
+            run_tasks(
+                str(task_config["dual_method"]),
+                run_dir / "tasks" / f"dual_seed_{seed}",
+                selection_path,
+                seed,
+            )
+        if args.with_task_diagnostics:
+            diagnostic_seed = local_seeds[0]
+            selection_path = (
+                run_dir
+                / "local"
+                / f"seed_{diagnostic_seed}"
+                / "selection_indices.pt"
+            )
+            for method in task_config.get("diagnostic_methods", []):
+                run_tasks(
+                    str(method),
+                    run_dir / "tasks" / f"diagnostics_seed_{diagnostic_seed}",
+                    selection_path,
+                    diagnostic_seed,
+                )
+        return
 
     if args.stage in {"aggregate", "all"}:
         run_command(

@@ -22,7 +22,7 @@
 
 `J_X` 是“哪些输入通道值得补激活量化残差”的离线索引；`J_W` 是“哪些输入通道值得补权重量化残差”的离线索引。两者都由校准集统计后固定，prefill/decode 时不重新选通道。
 
-局部比较会在完全相同的 selection/holdout 行上一次性计算论文 ARC、独立/共享双索引、单分支、随机和 oracle。端到端 PPL 默认执行 8 次完整模型遍历：BF16、RTN、论文 ARC 各一次，以及独立 `J_X/J_W` 的 5 个 selection seed。
+局部比较会在完全相同的 selection/holdout 行上一次性计算论文 ARC、独立/共享双索引、单分支、随机和 oracle。端到端 PPL 默认执行 8 次完整模型遍历：BF16、RTN、论文 ARC 各一次，以及独立 `J_X/J_W` 的 5 个 selection seed。下游任务单独作为 `tasks` 阶段运行，默认比较 BF16、RTN、论文 ARC 和 seed 0 的独立 `J_X/J_W`；需要判断方差时再扩成 5 个 seed。
 
 ## 目录边界
 
@@ -39,7 +39,7 @@ server_experiments/jx_jw_vs_arcquant/
 ├── prepare_wikitext2_cache.py # 生成可复用的离线 WikiText2 Arrow
 ├── run_server.py            # 分阶段编排、断点续跑、日志
 ├── validate_seed.py         # 不写死 28 层/196 Linear 的完整性检查
-├── aggregate_results.py     # 多 seed output-SSE/PPL 汇总
+├── aggregate_results.py     # 多 seed output-SSE/PPL/下游任务汇总
 ├── requirements-server.txt  # 与本地 ptq 环境对齐的核心版本
 └── runs/                    # 运行时生成，已被 .gitignore 排除
 ```
@@ -120,8 +120,9 @@ python server_experiments/jx_jw_vs_arcquant/run_server.py \
 - `calibrate`：论文 ARCQuant 的 `128 × 2048` 激活统计、重排索引和 `select_num`。
 - `local`：5 个 seed 的局部 output-SSE 比较，生成各自 `J_X/J_W`。
 - `ppl`：BF16/RTN/论文 ARC，加 5 个 `J_X/J_W` seed 的 WikiText2 PPL。
+- `tasks`：论文对齐的五项 zero-shot 任务和 5-shot MMLU。
 - `aggregate`：只重新汇总已有结果。
-- `all`：按上述顺序全部执行。
+- `all`：运行校准、局部实验、PPL 和汇总；有意不自动运行耗时更长、首次需要下载数据的 `tasks`。
 
 `--resume` 的行为是：完整阶段直接跳过；局部实验按已经完成的 module 续跑；PPL 按 layer checkpoint 续跑。日志始终写到 `<run-dir>/logs/`。
 
@@ -132,6 +133,36 @@ python server_experiments/jx_jw_vs_arcquant/run_server.py \
 ```
 
 如只想先看前 8 个 WikiText2 window，可加 `--max-windows 8`；这种 PPL 也只能做 smoke，不能和完整测试集数值混写。
+
+## 论文对齐的下游任务
+
+任务口径固定为 ARC-Challenge、HellaSwag、LAMBADA、PIQA、Winogrande 的 zero-shot 准确率，以及 MMLU 5-shot。五任务平均分别使用 ARC/HellaSwag/PIQA 的 normalized accuracy 和 LAMBADA/Winogrande 的 accuracy，和论文表格保持同一口径。评测依赖固定为 `lm-eval==0.4.8`。
+
+第一次运行要允许 lm-eval 把数据集写入持久化的 `HF_HOME`。先做每个任务最多 2 条样本的流程检查；MMLU 的 limit 是“每个子任务 2 条”，所以仍会遍历所有 MMLU 子类：
+
+```bash
+export HF_HOME=/root/autodl-tmp/hf_cache
+python server_experiments/jx_jw_vs_arcquant/run_server.py \
+  --config server_experiments/jx_jw_vs_arcquant/configs/llama31_8b.json \
+  --model /root/autodl-tmp/jx_jw_vs_arcquant/Llama-3.1-8B \
+  --run-dir /root/autodl-tmp/arcquant_runs/llama31_8b \
+  --wikitext-cache-dir /root/autodl-tmp/datasets/wikitext2_arrow \
+  --offline --device cuda:0 --resume --stage tasks \
+  --task-limit 2 --allow-task-downloads
+```
+
+确认 smoke 完成后，去掉 limit 跑完整主比较。数据已进入 `HF_HOME` 后不再需要 `--allow-task-downloads`：
+
+```bash
+python server_experiments/jx_jw_vs_arcquant/run_server.py \
+  --config server_experiments/jx_jw_vs_arcquant/configs/llama31_8b.json \
+  --model /root/autodl-tmp/jx_jw_vs_arcquant/Llama-3.1-8B \
+  --run-dir /root/autodl-tmp/arcquant_runs/llama31_8b \
+  --wikitext-cache-dir /root/autodl-tmp/datasets/wikitext2_arrow \
+  --offline --device cuda:0 --resume --stage tasks --task-limit 0
+```
+
+默认只跑 seed 0 的独立 `J_X/J_W`，先验证方法方向。若要给独立方法报告多 seed 均值，增加 `--task-seeds 0,1,2,3,4`；若要同时补跑共享 `J`，增加 `--with-task-diagnostics`。`--task-limit` 为正数的结果会明确标记 `full_evaluation=false`，不能和正式结果混用。每个方法的 zero-shot 与 MMLU 原始结果分开保存，因此中断后加 `--resume` 会从未完成的套件继续。
 
 ## 结果目录
 
@@ -149,6 +180,10 @@ python server_experiments/jx_jw_vs_arcquant/run_server.py \
 ├── ppl/
 │   ├── baselines/
 │   └── dual_seed_0..4/
+├── tasks/
+│   ├── baselines/
+│   ├── dual_seed_0..4/
+│   └── diagnostics_seed_0/            # 仅在显式要求时生成
 ├── logs/
 └── summary/
     ├── REPORT.md
@@ -156,7 +191,10 @@ python server_experiments/jx_jw_vs_arcquant/run_server.py \
     ├── local_strategy_aggregate.csv
     ├── local_key_comparisons.csv
     ├── ppl_runs.csv
-    └── ppl_aggregate.csv
+    ├── ppl_aggregate.csv
+    ├── tasks_runs.csv
+    ├── tasks_task_metrics.csv
+    └── tasks_aggregate.csv
 ```
 
 每个 run 都保存 Git commit/dirty 状态、最终配置、模型路径、GPU 和软件版本。服务器回传时至少保留整个 `summary/`、各 seed 的 `strategy_summary.csv`/`metadata.json`/验证 JSON，以及所有 PPL result JSON；大体积 checkpoint 不需要回传。

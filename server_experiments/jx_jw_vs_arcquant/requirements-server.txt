@@ -3,6 +3,7 @@
 # pip from silently replacing a Blackwell-compatible build with local 2.5.1.
 transformers==4.44.0
 datasets==3.4.0
+lm-eval==0.4.8
 pandas==2.3.3
 numpy==2.2.6
 matplotlib>=3.8,<4

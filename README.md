@@ -5,7 +5,7 @@ This repository is a frozen server-experiment version for comparing two NVFP4 re
 - the original ARCQuant `activation-max reorder + ARC` method;
 - an identity-layout dual-source method with independent offline indices `J_X/J_W` and a fixed `S/2 + S/2` budget.
 
-It also includes BF16 and ordinary RTN baselines, shared-index/single-branch/random ablations, output-aware diagnostic ceilings, five-seed local output-SSE evaluation, and five-seed WikiText2 perplexity evaluation.
+It also includes BF16 and ordinary RTN baselines, shared-index/single-branch/random ablations, output-aware diagnostic ceilings, five-seed local output-SSE evaluation, five-seed WikiText2 perplexity evaluation, and a paper-aligned downstream stage for five zero-shot tasks plus 5-shot MMLU.
 
 The code is based on the official [ARCQuant repository](https://github.com/actypedef/ARCQuant). Its original README is preserved in [ARCQUANT_UPSTREAM_README.md](ARCQUANT_UPSTREAM_README.md).
 
@@ -25,6 +25,8 @@ python server_experiments/jx_jw_vs_arcquant/check_fake_quant_environment.py \
 ```
 
 Generated models, calibration tensors, checkpoints, logs, and run directories are excluded from Git.
+
+The downstream stage is intentionally separate from `--stage all`. Run it after calibration and local selection with `--stage tasks`; the first invocation should add `--allow-task-downloads`, and full evaluation uses `--task-limit 0`. Exact commands and result fields are documented in the server guide above.
 
 ## Scope
 
