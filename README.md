@@ -11,36 +11,17 @@ The code is based on the official [ARCQuant repository](https://github.com/actyp
 
 ## Start here
 
-The complete Chinese experiment guide is in [server_experiments/jx_jw_vs_arcquant/README.md](server_experiments/jx_jw_vs_arcquant/README.md).
+For an RTX 5090, follow the complete Chinese setup and execution guide in [RTX5090_FAKE_QUANT_GUIDE.md](server_experiments/jx_jw_vs_arcquant/RTX5090_FAKE_QUANT_GUIDE.md). The algorithm and output layout are documented in [the experiment README](server_experiments/jx_jw_vs_arcquant/README.md).
 
-Activate the aligned environment and run a small non-paper smoke test first:
+PyTorch is installed separately because RTX 5090 needs a Blackwell-compatible CUDA 12.8 build:
 
 ```bash
+conda create -n ptq python=3.10 -y
 conda activate ptq
-pip install -r server_experiments/jx_jw_vs_arcquant/requirements-server.txt
-
-bash server_experiments/jx_jw_vs_arcquant/launch/run_quick_check.sh \
-  server_experiments/jx_jw_vs_arcquant/configs/qwen25_7b.json \
-  /models/Qwen2.5-7B-Instruct \
-  /data/wikitext2_arrow
-```
-
-Then launch the complete `128 × 2048` Qwen2.5-7B experiment:
-
-```bash
-bash server_experiments/jx_jw_vs_arcquant/launch/run_qwen25_7b.sh \
-  /models/Qwen2.5-7B-Instruct \
-  /data/wikitext2_arrow \
-  /data/arcquant_runs/qwen25_7b
-```
-
-Llama-3.1-8B has an equivalent launcher:
-
-```bash
-bash server_experiments/jx_jw_vs_arcquant/launch/run_llama31_8b.sh \
-  /models/Meta-Llama-3.1-8B \
-  /data/wikitext2_arrow \
-  /data/arcquant_runs/llama31_8b
+python -m pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r server_experiments/jx_jw_vs_arcquant/requirements-server.txt
+python server_experiments/jx_jw_vs_arcquant/check_fake_quant_environment.py \
+  --device cuda:0 --require-blackwell
 ```
 
 Generated models, calibration tensors, checkpoints, logs, and run directories are excluded from Git.

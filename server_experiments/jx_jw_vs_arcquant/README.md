@@ -34,6 +34,9 @@
 server_experiments/jx_jw_vs_arcquant/
 ├── configs/                 # Qwen2.5-7B、Llama-3.1-8B 固定配置
 ├── launch/                  # Linux 一键启动脚本
+├── RTX5090_FAKE_QUANT_GUIDE.md # 5090 从建环境到完整实验的逐步指南
+├── check_fake_quant_environment.py # Blackwell/PyTorch/fake-NVFP4 自检
+├── prepare_wikitext2_cache.py # 生成可复用的离线 WikiText2 Arrow
 ├── run_server.py            # 分阶段编排、断点续跑、日志
 ├── validate_seed.py         # 不写死 28 层/196 Linear 的完整性检查
 ├── aggregate_results.py     # 多 seed output-SSE/PPL 汇总
@@ -43,12 +46,18 @@ server_experiments/jx_jw_vs_arcquant/
 
 ## 环境与数据
 
-本地已经核对过的核心版本是 Python 环境 `ptq`、PyTorch 2.5.1、Transformers 4.44.0、Datasets 3.4.0、Pandas 2.3.3、NumPy 2.2.6。服务器优先复用同版本环境：
+本地复现实验核对过 PyTorch 2.5.1，但 RTX 5090 不能照搬这个旧版本。5090 服务器要单独安装支持 Blackwell 的 PyTorch 2.7.1 CUDA 12.8 wheel，再装其余依赖：
 
 ```bash
+conda create -n ptq python=3.10 -y
 conda activate ptq
-pip install -r server_experiments/jx_jw_vs_arcquant/requirements-server.txt
+python -m pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r server_experiments/jx_jw_vs_arcquant/requirements-server.txt
+python server_experiments/jx_jw_vs_arcquant/check_fake_quant_environment.py \
+  --device cuda:0 --require-blackwell
 ```
+
+5090 从租机、下载模型和数据，到分阶段运行、续跑和回传结果的完整命令见 [`RTX5090_FAKE_QUANT_GUIDE.md`](RTX5090_FAKE_QUANT_GUIDE.md)。本阶段只做 fake quant，不需要系统 CUDA Toolkit、`nvcc` 或真实 NVFP4 内核。
 
 模型必须是服务器上的本地 Hugging Face 目录。配置文件故意不保存机器路径，通过 `--model` 或 `ARCQUANT_MODEL` 传入。
 

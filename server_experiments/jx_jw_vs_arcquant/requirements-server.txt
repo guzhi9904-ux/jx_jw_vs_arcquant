@@ -1,9 +1,16 @@
-# Versions aligned with the local `ptq` environment used for the verified runs.
-torch==2.5.1
+# Install PyTorch separately. RTX 5090 must use the official cu128 wheel;
+# see RTX5090_FAKE_QUANT_GUIDE.md. Keeping torch out of this file prevents
+# pip from silently replacing a Blackwell-compatible build with local 2.5.1.
 transformers==4.44.0
 datasets==3.4.0
 pandas==2.3.3
 numpy==2.2.6
+matplotlib>=3.8,<4
 accelerate>=0.33,<2
 tqdm>=4.66
 sentencepiece>=0.2
+scikit-learn>=1.5,<2
+pyarrow>=17,<20
+huggingface_hub>=0.24,<1
+safetensors>=0.4
+protobuf>=4.25
