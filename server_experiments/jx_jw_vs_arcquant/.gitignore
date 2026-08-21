@@ -1,0 +1,13 @@
+# Server-generated artifacts. Keep code/configuration in Git, not models/results.
+runs/
+logs/
+artifacts/
+results/
+*.pt
+*.pth
+*.bin
+*.safetensors
+__pycache__/
+*.py[cod]
+.pytest_cache/
+release_repo/

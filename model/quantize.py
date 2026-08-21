@@ -1,17 +1,20 @@
+"""量化格式的 PyTorch 参考实现与 ARC fake-quant 路径。
+
+这些函数大多返回“量化后再反量化”的浮点张量，便于精度实验，并不真正
+节省显存。NVFP4 的真实性能路径位于 ``kernels/``，通过 ``agemm`` 扩展调用。
+"""
+
 import torch
 import torch.nn.functional as F
 import numpy as np
 import gc
-
-import sys
-sys.path.append('kernels/build/')
-import agemm 
 
 import math
 import random
 
 
 def quantize_e2m1(tensor):
+    """把输入就近映射到 NVFP4 的 E2M1 有限码本（此处不打包 4 bit）。"""
     representable_vals = torch.tensor([
         -6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0,
         0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
@@ -38,6 +41,7 @@ def dequantize_int4(tensor):
     return tensor
 
 def quantize_ue4m3(tensor):
+    """模拟 NVFP4 使用的无符号 UE4M3 分组 scale，并返回重构值。"""
     tensor = torch.clamp(tensor, min=2e-3, max=448.0)
     
     exponent = torch.floor(torch.log2(tensor + 1e-9))
@@ -52,6 +56,7 @@ def dequantize_ue4m3(tensor):
     return tensor
 
 def quantize_ue8m0(tensor):
+    """模拟 MX 格式的 UE8M0（仅指数、2 的幂）分组 scale。"""
     exponent = torch.ceil(torch.log2(tensor + 1e-9))
     exponent = torch.clamp(exponent, min=-127, max=127)
     
@@ -95,6 +100,7 @@ def quantize_e6m2(tensor):
     return reconstructed_val
 
 def quantize_hif4_tensor(tensor, group_size=64):
+    """HiF4 fake quant：64 元素一组，并构造 8/16 元素层级 scale。"""
     original_shape = tensor.shape
     
     padding = (group_size - tensor.shape[-1] % group_size) % group_size
@@ -143,15 +149,18 @@ def quantize_hif4_tensor(tensor, group_size=64):
 
 
 def quantize_nvfp4_tensor(tensor, group_size=16):
+    """NVFP4 fake quant：每 16 个末维元素共享一个 UE4M3 scale。"""
     original_shape = tensor.shape
     
     padding = (group_size - tensor.shape[-1] % group_size) % group_size
     if padding != 0:
         tensor = F.pad(tensor, (0, padding))
         
+    # 除末维外全部展平；每一行就是一个独立的量化 group。
     reshaped_tensor = tensor.view(-1, group_size)
     
     max_abs_val = torch.max(torch.abs(reshaped_tensor), dim=1, keepdim=True)[0]
+    # E2M1 最大有限值为 6，因此先把 group 动态范围缩放到 [-6, 6]。
     scale = max_abs_val / 6.0
     scale[scale == 0] = 1e-9 
     
@@ -172,6 +181,7 @@ def quantize_nvfp4_tensor(tensor, group_size=16):
     return dequantized_tensor.view(original_shape)
 
 def quantize_mxfp4_tensor(tensor, group_size=32):
+    """MXFP4 fake quant：32 元素共享 UE8M0 scale，数据仍使用 E2M1。"""
     original_shape = tensor.shape
     
     padding = (group_size - tensor.shape[-1] % group_size) % group_size
@@ -201,6 +211,7 @@ def quantize_mxfp4_tensor(tensor, group_size=32):
     return dequantized_tensor.view(original_shape)
 
 def quantize_int4_tensor(tensor, group_size=128):
+    """对称 INT4 fake quant；默认每 128 个末维元素共享浮点 scale。"""
     original_shape = tensor.shape
     
     padding = (group_size - tensor.shape[-1] % group_size) % group_size
@@ -285,10 +296,18 @@ def quantize_mxfp6_tensor(tensor, group_size=32):
 
 
 def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
+    """参考版的权重量化，并为 ARC 扩展内积维度。
+
+    非 NVFP4 调用方会先把 ``w`` 的输入通道重排，再向本函数传入恒等
+    ``reorder_index``；当 ``select_num=KE`` 大于 0 时，本函数把当前排列中
+    最后 KE 列的量化权重复制到矩阵右侧：
+    ``W_arc = [Q(W_reordered), Q(W_selected)]``，形状从 ``[N,K]`` 变为
+    ``[N,K+KE]``。它将与激活侧追加的量化残差做同一次 GEMM。
+    """
     orig_dtype = w.dtype 
     
     if dtype == "NVFP4":
-        scale = torch.max(w).to(torch.float32) / (448.0*6.0)
+        scale = torch.max(w.abs()).to(torch.float32) / (448.0*6.0)
         quantize_func = quantize_nvfp4_tensor
     elif dtype == "MXFP4":
         scale = torch.tensor(1.0, device=w.device, dtype=torch.float32)
@@ -305,17 +324,32 @@ def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
     
     if select_num == 0:
         q_w = quantize_func(w_fp32)
-        return q_w.to(orig_dtype), scale_w.to(orig_dtype), scale.to(orig_dtype)
+        return (q_w * scale).to(orig_dtype), scale_w.to(orig_dtype), scale.to(orig_dtype)
     else:
+        # reorder_index 的尾部正是校准阶段挑出的重要通道。
         topk_index = reorder_index[-select_num:]
         q_w = torch.cat([quantize_func(w_fp32), quantize_func(w_fp32[:, topk_index])], dim=1)
-        return q_w.to(orig_dtype), scale_w.to(orig_dtype), scale.to(orig_dtype)
+        return (q_w * scale).to(orig_dtype), scale_w.to(orig_dtype), scale.to(orig_dtype)
 
 def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
+    """参考版激活量化，并生成 Augmented Residual Channels。
+
+    调用方通常已把通道按重要性重排。先得到主分支 ``q_x = Q(x)``，再对
+    ``reorder_index`` 指向的最后 KE 个重要通道计算并再次
+    量化残差 ``q_error = Q(x - Q(x))``，最终返回
+    ``X_arc = [q_x, q_error_selected]``。配合权重侧 ``[Q(W), Q(W_selected)]``，
+    一次扩维 GEMM 近似计算 ``Q(x)Q(W) + Q(error)Q(W_selected)``。
+
+    ``scale_x`` 是接口需要的逐行绝对最大值；非 NVFP4 fake 路径的
+    ``F.linear`` 不使用它。返回张量保持浮点 dtype，便于数值模拟。
+    """
     orig_dtype = x.dtype  
     
     if dtype == "NVFP4":
-        scale = torch.max(x).to(torch.float32) / (448.0*6.0)
+        # NVFP4's tensor scale is based on magnitude. Using max(x) breaks
+        # all-negative tensors and under-scales tensors whose negative tail
+        # is larger than the positive tail.
+        scale = torch.max(x.abs()).to(torch.float32) / (448.0*6.0)
         quantize_func = quantize_nvfp4_tensor
     elif dtype == "MXFP4":
         scale = torch.tensor(1.0, device=x.device, dtype=torch.float32)
@@ -332,10 +366,11 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
     
     if select_num == 0:
         q_x = quantize_func(x_fp32)
-        return q_x.to(orig_dtype), scale_x.to(orig_dtype), scale.to(orig_dtype)
+        return (q_x * scale).to(orig_dtype), scale_x.to(orig_dtype), scale.to(orig_dtype)
     else:
         topk_index = reorder_index[-select_num:]
         q_x = quantize_func(x_fp32)
+        # ARC 的关键信息只存在于选中通道的一级量化误差中。
         error_e = x_fp32 - q_x
         q_error_k = quantize_func(error_e[:, topk_index])
         
@@ -344,6 +379,7 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
 
 @torch.no_grad()
 def hadamard_transform(x, normalize=True, block_size=-1):
+    """原地风格的快速 Walsh-Hadamard 参考实现；不是默认 ARC pipeline 的步骤。"""
     n = x.shape[-1]
     if block_size == -1:
         if n <= 0 or (n & (n - 1)) != 0:

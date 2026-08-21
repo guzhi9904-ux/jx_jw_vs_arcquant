@@ -1,108 +1,50 @@
-# ARCQuant: Boosting NVFP4 Quantization with Augmented Residual Channels for LLMs
+# J_X/J_W vs. ARCQuant
 
-<h5 align="center">
+This repository is a frozen server-experiment version for comparing two NVFP4 residual-compensation designs:
 
-[![arXiv](https://img.shields.io/badge/ARCQuant-2601.07475-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2601.07475)
-[![Poster](https://img.shields.io/badge/Poster-ACL%202026-2179b5.svg)](assets/ARCQuant_ACL2026_A0_Poster.pdf)
-<br>
+- the original ARCQuant `activation-max reorder + ARC` method;
+- an identity-layout dual-source method with independent offline indices `J_X/J_W` and a fixed `S/2 + S/2` budget.
 
-</h5>
+It also includes BF16 and ordinary RTN baselines, shared-index/single-branch/random ablations, output-aware diagnostic ceilings, five-seed local output-SSE evaluation, and five-seed WikiText2 perplexity evaluation.
 
-![arcquant](assets/ARCQuant_Visualize.png)
+The code is based on the official [ARCQuant repository](https://github.com/actypedef/ARCQuant). Its original README is preserved in [ARCQUANT_UPSTREAM_README.md](ARCQUANT_UPSTREAM_README.md).
 
-**ARCQuant** is a high-performance quantization framework for low-bit LLMs that improves accuracy under fine-grained formats such as NVFP4, while preserving a unified and efficient inference pipeline.
+## Start here
 
-While fine-grained quantization formats such as NVFP4 effectively isolate quantization noise, activation outliers can still cause severe accuracy degradation in critical channels. Traditional mixed-precision methods address this by splitting computations into separate branches, which introduces additional kernel launch overhead and memory fragmentation.
+The complete Chinese experiment guide is in [server_experiments/jx_jw_vs_arcquant/README.md](server_experiments/jx_jw_vs_arcquant/README.md).
 
-ARCQuant takes a different approach. Instead of treating outliers as a separate computation path, we leverage the structural sparsity of quantization errors in fine-grained settings. We capture the quantization residuals of critical channels and fuse them back into the computation as **Augmented Residual Channels (ARC)**.
-
-## News
-
-- [2026/04] 🏆 ARCQuant has been accepted to **ACL 2026 Main Conference**!
-- [2026/03] 🔥 ARCQuant has been integrated into NVIDIA [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/pull/11333), with contributions from [Tracin](https://github.com/Tracin)!
-- [2026/01] 🔥 ARCQuant is publicly available on arXiv! Check our paper [here](https://arxiv.org/abs/2601.07475).
-
-## To Do
-
-- [x] Release code for reproducing results.
-- [x] Release CUDA kernels for NVFP4.
-- [x] Support [vLLM](https://github.com/vllm-project/vllm) integration.
-- [ ] **Model Support**: Add support for more model families and architectures:
-    - [ ] Qwen3
-    - [x] Mixtral
-    - [ ] Wan2.2
-
-## Installation
+Activate the aligned environment and run a small non-paper smoke test first:
 
 ```bash
-conda create -n arcquant python=3.10 -y
-conda activate arcquant
+conda activate ptq
+pip install -r server_experiments/jx_jw_vs_arcquant/requirements-server.txt
+
+bash server_experiments/jx_jw_vs_arcquant/launch/run_quick_check.sh \
+  server_experiments/jx_jw_vs_arcquant/configs/qwen25_7b.json \
+  /models/Qwen2.5-7B-Instruct \
+  /data/wikitext2_arrow
 ```
-Please make sure that [CUDA 12.8](https://developer.nvidia.com/cuda-12-8-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=22.04&target_type=runfile_local) is available in your environment.
+
+Then launch the complete `128 × 2048` Qwen2.5-7B experiment:
+
 ```bash
-git clone --recurse-submodules https://github.com/actypedef/ARCQuant.git
-cd ARCQuant
-pip install -r requirements.txt
+bash server_experiments/jx_jw_vs_arcquant/launch/run_qwen25_7b.sh \
+  /models/Qwen2.5-7B-Instruct \
+  /data/wikitext2_arrow \
+  /data/arcquant_runs/qwen25_7b
 ```
 
-## Usage
+Llama-3.1-8B has an equivalent launcher:
 
-### Building Kernels
 ```bash
-sudo apt-get update
-sudo apt-get install python3-dev
-```
-```bash
-conda install pybind11
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-```
-```bash
-cd kernels/
-bash remake.sh
+bash server_experiments/jx_jw_vs_arcquant/launch/run_llama31_8b.sh \
+  /models/Meta-Llama-3.1-8B \
+  /data/wikitext2_arrow \
+  /data/arcquant_runs/llama31_8b
 ```
 
-This process may take a few minutes.
+Generated models, calibration tensors, checkpoints, logs, and run directories are excluded from Git.
 
-### Preprocessing
+## Scope
 
-Precomputed `reorder_indices` and `select_num` are required for quantization:
-```bash
-python reorder_indices.py --model /PATH/TO/YOUR/MODEL/ --samples 128 --seqlen 2048 --act_sort_metric max
-```
-The generated files will be saved to `./saved/`
-
-### Accuracy Evaluation
-
-ARCQuant supports multiple formats, including NVFP4, MXFP4, HiF4, and INT4. You can modify the `quant_type` parameter as needed.
-```bash
-bash evaluate.sh /PATH/TO/YOUR/MODEL/
-```
-
-## Efficiency Evaluation
-
-FlashInfer:
-```bash
-cd third-party/flashinfer
-python -m pip install -v .
-```
-vLLM-based efficiency evaluation scripts will be released in a future update.
-
-## Citation
-```
-@article{meng2026arcquant,
-  title={ARCQuant: Boosting NVFP4 Quantization with Augmented Residual Channels for LLMs},
-  author={Meng, Haoqian and Luo, Yilun and Zhao, Yafei and Liu, Wenyuan and Zhang, Peng and Ma, Xindian},
-  journal={arXiv preprint arXiv:2601.07475},
-  year={2026}
-}
-```
-
-## Acknowledgements
-
-This project builds on several excellent open-source efforts. We sincerely thank the community for their contributions:
-- [Atom](https://github.com/efeslab/Atom.git)
-- [QuaRot](https://github.com/spcl/QuaRot)
-- [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)
-- [FlashInfer](https://github.com/flashinfer-ai/flashinfer/tree/main)
-- [CUTLASS](https://github.com/NVIDIA/cutlass)
-- [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+The W4A4 evaluations in this version use one shared fake-NVFP4 numerical backend. They are intended to compare quantization error and perplexity, not real Blackwell kernel latency. Rotation, online dynamic selection, score tuning, and new hardware-block selectors are intentionally outside this frozen v1.

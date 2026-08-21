@@ -6,7 +6,10 @@ import functools
 
 import sys
 sys.path.append('./kernels/build/')
-import agemm
+try:
+    import agemm
+except (ImportError, OSError):
+    agemm = None
 
 def get_minq_maxq(bits: int, sym: bool):
     if sym:

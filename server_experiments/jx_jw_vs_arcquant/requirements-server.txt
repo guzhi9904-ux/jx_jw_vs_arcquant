@@ -1,0 +1,9 @@
+# Versions aligned with the local `ptq` environment used for the verified runs.
+torch==2.5.1
+transformers==4.44.0
+datasets==3.4.0
+pandas==2.3.3
+numpy==2.2.6
+accelerate>=0.33,<2
+tqdm>=4.66
+sentencepiece>=0.2
