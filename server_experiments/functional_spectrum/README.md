@@ -99,6 +99,27 @@ The matched-depth extension raises only large-K down projections to top-1024
 so it can report the equal-fraction rank 896 point; K=4096 modules remain
 top-512.
 
+## Full-depth attention and down scan
+
+The next diagnostic maps q/k/v/o at every decoder layer, restricts per-head
+analysis to the preregistered Llama depth grid
+`0,4,8,12,16,20,24,28,31`, and scans `down_proj` on that same grid in a
+separate output tree:
+
+```bash
+MODEL_PATH=/root/autodl-tmp/models/Llama-3.1-8B \
+WIKITEXT_CACHE_DIR=/root/autodl-tmp/datasets/wikitext2_arrow \
+OUTPUT_ROOT=/root/autodl-tmp/arcquant_runs/llama31_full_depth_scan \
+CONDA_ENV_NAME=ptq \
+bash server_experiments/functional_spectrum/run_llama31_full_depth_scan.sh
+```
+
+The attention output includes `figure_F_qkvo_depth_heatmaps_rank512.png`,
+`figure_I_attention_depth_profiles.png`, and nine-layer per-head diagnostics.
+The down output uses rank 896 as the 6.25%-of-K comparison and also records
+rank 1024 in `figure_J_down_depth_profiles.png`. Neither run executes Stage
+1.5 or changes the frozen seven-module gate.
+
 A CUDA GPU with at least 24 GiB is recommended; the supplied preflight fails
 early below 20 GiB. These are offline fake-NVFP4 mechanism diagnostics and do
 not establish Blackwell kernel throughput.

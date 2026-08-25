@@ -86,7 +86,10 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--modules",
         default="auto",
-        help="auto, depth-control, or comma-separated layers.N.* names",
+        help=(
+            "auto, depth-control, attention-all, down-depth-scan, or "
+            "comma-separated layers.N.* names"
+        ),
     )
     parser.add_argument("--selection-samples", type=int, default=4)
     parser.add_argument("--holdout-samples", type=int, default=4)
@@ -121,16 +124,42 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Analyze every exact head_dim-wide q/k/v head on the combined split",
     )
+    parser.add_argument(
+        "--head-analysis-layers",
+        default="all",
+        help="all or a comma-separated layer list limiting the expensive per-head pass",
+    )
     parser.add_argument("--head-oversample", type=int, default=16)
     parser.add_argument("--head-power-iterations", type=int, default=1)
     parser.add_argument("--head-overlap-rank", type=int, default=32)
     args = parser.parse_args(None if argv is None else list(argv))
+    args.module_scope = args.modules
     if args.modules == "auto":
         args.modules = None
-    elif args.modules != "depth-control":
+    elif args.modules not in {"depth-control", "attention-all", "down-depth-scan"}:
         args.modules = tuple(
             item.strip() for item in args.modules.split(",") if item.strip()
         )
+        args.module_scope = "explicit"
+    if args.head_analysis_layers == "all":
+        args.head_analysis_layers = None
+    else:
+        try:
+            args.head_analysis_layers = tuple(
+                sorted(
+                    {
+                        int(item.strip())
+                        for item in args.head_analysis_layers.split(",")
+                        if item.strip()
+                    }
+                )
+            )
+        except ValueError as error:
+            parser.error(f"invalid --head-analysis-layers: {error}")
+        if not args.head_analysis_layers or min(args.head_analysis_layers) < 0:
+            parser.error("--head-analysis-layers must contain nonnegative layers")
+        if not args.head_analysis:
+            parser.error("--head-analysis-layers requires --head-analysis")
     if args.cpu_threads > 0:
         torch.set_num_threads(args.cpu_threads)
     if args.output_root is None:
@@ -487,12 +516,19 @@ def _write_markdown_report(
     figures: dict[str, str],
     model_label: str,
     head_analysis: dict[str, Any] | None,
+    module_scope: str,
 ) -> None:
     rank256 = [row for row in rows if int(row["rank"]) == 256]
     by_source = {
         source: [row for row in rank256 if row["source"] == source]
         for source in ("X", "W")
     }
+    frozen_scope = module_scope == "auto"
+    protocol_statement = (
+        "判定严格使用预注册 rank-256 门槛；没有使用 PPL、下游任务或 Stage 2 预期收益改写阈值。"
+        if frozen_scope
+        else f"本轮 `{module_scope}` 是冻结 Stage 1/1.5 之后的诊断扩展；rank-256 gate 仅作描述，不能替代七模块预注册结论。"
+    )
     lines = [
         f"# Stage 1 — Functional Gram 低秩结构验证（{model_label}）",
         "",
@@ -501,7 +537,7 @@ def _write_markdown_report(
         f"- **X source: {gate['X']['verdict']}**",
         f"- **W source: {gate['W']['verdict']}**",
         "",
-        "判定严格使用预注册 rank-256 门槛；没有使用 PPL、下游任务或 Stage 2 预期收益改写阈值。",
+        protocol_statement,
         "",
         "## Rank-256 核心指标",
         "",
@@ -609,10 +645,14 @@ def _write_markdown_report(
             "",
             "## 局限与下一步",
             "",
-            "`auto` 范围采用预注册的 7-module early/middle/late 设计；`depth-control` 范围则在这三个深度同时"
-            "覆盖 q/k/v/o/gate/up/down，用于消除模块类型与层深度混杂。两者的 gate 不能混写。",
+            "`auto` 范围采用预注册的 7-module early/middle/late 设计；其他 module preset 均属于机制诊断，"
+            "用于消除深度混杂或定位候选层，不能与冻结 gate 混写。",
             "",
-            "两个 source 均为 NO-GO，因此按预注册规则，本方向不进入 Stage 2 的 SVD-based support selection。",
+            (
+                "两个 source 均为 NO-GO，因此按预注册规则，本方向不进入 Stage 2 的 SVD-based support selection。"
+                if frozen_scope
+                else "本轮结果用于绘制深度轨迹与选择后续机制验证层，不对冻结 Stage 1/1.5 verdict 作任何改写。"
+            ),
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -687,6 +727,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             oversample=args.head_oversample,
             power_iterations=args.head_power_iterations,
             overlap_rank=args.head_overlap_rank,
+            layers=args.head_analysis_layers,
         )
 
     rows = _summary_rows(source_artifacts)
@@ -734,6 +775,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         figures,
         Path(args.model).name,
         head_result,
+        args.module_scope,
     )
     manifest = {
         "status": "complete" if validation["status"] == "passed" else "validation_failed",

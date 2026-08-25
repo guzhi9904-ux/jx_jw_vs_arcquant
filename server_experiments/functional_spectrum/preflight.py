@@ -15,7 +15,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from functional_gram.collect_stats import (  # noqa: E402
+    attention_all_modules,
     depth_control_modules,
+    depth_scan_layers,
+    down_depth_scan_modules,
     initial_cost_control_modules,
 )
 from functional_gram.model_inputs import model_weight_files  # noqa: E402
@@ -55,6 +58,9 @@ def main() -> None:
         raise ValueError("checkpoint does not look like the expected causal decoder")
     modules = initial_cost_control_modules(num_layers)
     depth_modules = depth_control_modules(num_layers)
+    attention_modules = attention_all_modules(num_layers)
+    scan_layers = depth_scan_layers(num_layers)
+    down_modules = down_depth_scan_modules(num_layers)
     maximum_k = max(hidden_size, intermediate_size)
     gram_gib = maximum_k * maximum_k * 4 / 2**30
     payload = {
@@ -74,6 +80,12 @@ def main() -> None:
         },
         "target_modules": modules,
         "depth_control_target_modules": depth_modules,
+        "full_depth_diagnostic": {
+            "attention_module_count": len(attention_modules),
+            "attention_layers": list(range(num_layers)),
+            "per_head_layers": scan_layers,
+            "down_target_modules": down_modules,
+        },
         "weight_files": [
             {"name": path.name, "bytes": path.stat().st_size} for path in weights
         ],

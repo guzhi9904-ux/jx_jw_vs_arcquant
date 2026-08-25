@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from functional_gram.plot_stage1 import _equal_fraction_heatmap, _heatmap_at_rank
+from functional_gram.plot_stage1 import (
+    _attention_depth_profiles,
+    _down_depth_profiles,
+    _equal_fraction_heatmap,
+    _heatmap_at_rank,
+)
 
 
 class Stage1PlotTests(unittest.TestCase):
@@ -42,6 +47,8 @@ class Stage1PlotTests(unittest.TestCase):
             root = Path(directory)
             rank_path = root / "rank512.png"
             equal_path = root / "equal.png"
+            profile_path = root / "profile.png"
+            down_profile_path = root / "down_profile.png"
             _heatmap_at_rank(
                 records,
                 summary,
@@ -51,8 +58,12 @@ class Stage1PlotTests(unittest.TestCase):
                 figure_title="test",
             )
             _equal_fraction_heatmap(records, summary, equal_path)
+            _attention_depth_profiles(summary, profile_path)
+            _down_depth_profiles(summary, down_profile_path)
             self.assertGreater(rank_path.stat().st_size, 10_000)
             self.assertGreater(equal_path.stat().st_size, 10_000)
+            self.assertGreater(profile_path.stat().st_size, 10_000)
+            self.assertGreater(down_profile_path.stat().st_size, 10_000)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,21 @@ class HeadAnalysisTests(unittest.TestCase):
     def test_depth_control_cli_preset_is_preserved(self) -> None:
         self.assertEqual(parse_args(["--modules", "depth-control"]).modules, "depth-control")
 
+    def test_full_depth_presets_and_head_layer_filter_are_preserved(self) -> None:
+        args = parse_args(
+            [
+                "--modules",
+                "attention-all",
+                "--head-analysis",
+                "--head-analysis-layers",
+                "0,4,8,12,16,20,24,28,31",
+            ]
+        )
+        self.assertEqual(args.modules, "attention-all")
+        self.assertEqual(
+            args.head_analysis_layers, (0, 4, 8, 12, 16, 20, 24, 28, 31)
+        )
+
     def test_end_to_end_head_analysis_writes_valid_outputs(self) -> None:
         generator = torch.Generator().manual_seed(29)
         x_a = torch.randn(10, 128, generator=generator)
@@ -104,8 +119,10 @@ class HeadAnalysisTests(unittest.TestCase):
                 oversample=4,
                 power_iterations=1,
                 overlap_rank=16,
+                layers=(0,),
             )
             self.assertEqual(result["status"], "passed", msg=result)
+            self.assertEqual(result["analyzed_layers"], [0])
             for path in result["outputs"].values():
                 self.assertTrue(Path(path).is_file())
 

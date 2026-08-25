@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from functional_gram.collect_stats import depth_control_modules, initial_cost_control_modules
+from functional_gram.collect_stats import (
+    attention_all_modules,
+    depth_control_modules,
+    depth_scan_layers,
+    down_depth_scan_modules,
+    initial_cost_control_modules,
+)
 from functional_gram.model_inputs import model_weight_files
 
 
@@ -40,6 +46,22 @@ class ModelInputTests(unittest.TestCase):
                 "mlp.down_proj",
             ):
                 self.assertIn(f"layers.{layer}.{local_name}", modules)
+
+    def test_full_depth_attention_and_down_scan_presets(self) -> None:
+        attention = attention_all_modules(32)
+        self.assertEqual(len(attention), 128)
+        self.assertEqual(attention[0], "layers.0.self_attn.q_proj")
+        self.assertEqual(attention[-1], "layers.31.self_attn.o_proj")
+        self.assertEqual(
+            depth_scan_layers(32), (0, 4, 8, 12, 16, 20, 24, 28, 31)
+        )
+        self.assertEqual(
+            down_depth_scan_modules(32),
+            tuple(
+                f"layers.{layer}.mlp.down_proj"
+                for layer in (0, 4, 8, 12, 16, 20, 24, 28, 31)
+            ),
+        )
 
 
 if __name__ == "__main__":

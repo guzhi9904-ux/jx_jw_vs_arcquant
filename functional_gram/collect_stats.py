@@ -73,6 +73,42 @@ def depth_control_modules(num_layers: int) -> tuple[str, ...]:
     )
 
 
+def attention_all_modules(num_layers: int) -> tuple[str, ...]:
+    """Return q/k/v/o projections at every decoder depth."""
+
+    if num_layers <= 0:
+        raise ValueError("at least one decoder layer is required")
+    local_names = (
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+    )
+    return tuple(
+        f"layers.{layer}.{local_name}"
+        for layer in range(num_layers)
+        for local_name in local_names
+    )
+
+
+def depth_scan_layers(num_layers: int) -> tuple[int, ...]:
+    """Return approximately eight uniform intervals plus the final layer."""
+
+    if num_layers <= 0:
+        raise ValueError("at least one decoder layer is required")
+    step = max(1, num_layers // 8)
+    return tuple(dict.fromkeys((*range(0, num_layers, step), num_layers - 1)))
+
+
+def down_depth_scan_modules(num_layers: int) -> tuple[str, ...]:
+    """Return down projections at preregistered depth-scan layers."""
+
+    return tuple(
+        f"layers.{layer}.mlp.down_proj"
+        for layer in depth_scan_layers(num_layers)
+    )
+
+
 def all_linears_modules(num_layers: int) -> tuple[str, ...]:
     local_names = (
         "self_attn.q_proj",
@@ -153,6 +189,10 @@ def collect_decoder_operands(
         requested_modules: Iterable[str] = initial_cost_control_modules(num_layers)
     elif modules == "depth-control":
         requested_modules = depth_control_modules(num_layers)
+    elif modules == "attention-all":
+        requested_modules = attention_all_modules(num_layers)
+    elif modules == "down-depth-scan":
+        requested_modules = down_depth_scan_modules(num_layers)
     elif isinstance(modules, str):
         raise ValueError(f"unknown module preset: {modules}")
     else:

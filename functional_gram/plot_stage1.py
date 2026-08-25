@@ -15,6 +15,7 @@ import torch
 
 
 MODULE_ORDER = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+ATTENTION_ORDER = ("q_proj", "k_proj", "v_proj", "o_proj")
 BLUE = "#2F6BFF"
 ORANGE = "#E07A2D"
 INK = "#22252A"
@@ -68,6 +69,18 @@ def _line_figure(
     reference_ranks: tuple[int, ...] = (),
 ) -> None:
     subset = [row for row in records if row["source"] == source]
+    if len(subset) > 24:
+        representative: list[dict[str, Any]] = []
+        for module_type in MODULE_ORDER:
+            group = sorted(
+                (row for row in subset if row["module_type"] == module_type),
+                key=lambda row: int(row["layer"]),
+            )
+            if not group:
+                continue
+            for index in dict.fromkeys((0, len(group) // 2, len(group) - 1)):
+                representative.append(group[index])
+        subset = representative
     fig, ax = plt.subplots(figsize=(10.5, 6.2), constrained_layout=True)
     colors = plt.cm.Blues(np.linspace(0.4, 0.95, max(len(subset), 2)))
     line_styles = ("-", "--", "-.", ":")
@@ -123,7 +136,15 @@ def _heatmap_at_rank(
         ("rho_struct", f"Structural coverage at rank {rank}"),
         ("split_overlap", f"Split overlap at rank {rank}"),
     )
-    fig, axes = plt.subplots(2, 3, figsize=(16, 7.5), constrained_layout=True, squeeze=False)
+    figure_height = max(7.5, 2.5 + 0.4 * len(layers))
+    annotation_size = 8 if len(layers) <= 12 else 5.5
+    fig, axes = plt.subplots(
+        2,
+        3,
+        figsize=(16, figure_height),
+        constrained_layout=True,
+        squeeze=False,
+    )
     cmap = plt.cm.Blues.copy()
     cmap.set_bad("#ECEFF3")
     image = None
@@ -147,7 +168,15 @@ def _heatmap_at_rank(
             for i in range(matrix.shape[0]):
                 for j in range(matrix.shape[1]):
                     if np.isfinite(matrix[i, j]):
-                        ax.text(j, i, f"{matrix[i, j]:.2f}", ha="center", va="center", fontsize=8, color=INK if matrix[i, j] < 0.65 else "white")
+                        ax.text(
+                            j,
+                            i,
+                            f"{matrix[i, j]:.2f}",
+                            ha="center",
+                            va="center",
+                            fontsize=annotation_size,
+                            color=INK if matrix[i, j] < 0.65 else "white",
+                        )
             ax.set_xticks(range(len(module_order)), [name.replace("_proj", "") for name in module_order], rotation=35, ha="right")
             ax.set_yticks(range(len(layers)), layers)
             ax.set_xlabel("Linear module type")
@@ -169,6 +198,11 @@ def _equal_fraction_heatmap(
     """Compare every module at 6.25% of K (256/4096; 896/14336)."""
 
     layers = sorted({int(row["layer"]) for row in records})
+    module_order = tuple(
+        module
+        for module in MODULE_ORDER
+        if any(row["module_type"] == module for row in records)
+    )
     selected = [row for row in summary_rows if bool(row["equal_fraction_reference"])]
     lookup = {
         (int(row["layer"]), row["module"], row["source"]): row
@@ -179,16 +213,20 @@ def _equal_fraction_heatmap(
         ("rho_struct", "Structural coverage at 6.25% of K"),
         ("split_overlap", "Split overlap at 6.25% of K"),
     )
-    fig, axes = plt.subplots(2, 3, figsize=(16, 7.5), constrained_layout=True)
+    figure_height = max(7.5, 2.5 + 0.4 * len(layers))
+    annotation_size = 7 if len(layers) <= 12 else 5
+    fig, axes = plt.subplots(
+        2, 3, figsize=(16, figure_height), constrained_layout=True
+    )
     cmap = plt.cm.Blues.copy()
     cmap.set_bad("#ECEFF3")
     image = None
     for source_index, source in enumerate(("X", "W")):
         for metric_index, (metric, title) in enumerate(metrics):
-            matrix = np.full((len(layers), len(MODULE_ORDER)), np.nan)
+            matrix = np.full((len(layers), len(module_order)), np.nan)
             ranks = np.full_like(matrix, np.nan)
             for i, layer in enumerate(layers):
-                for j, module_type in enumerate(MODULE_ORDER):
+                for j, module_type in enumerate(module_order):
                     module_name = next(
                         (
                             row["module"]
@@ -212,12 +250,12 @@ def _equal_fraction_heatmap(
                             f"{matrix[i, j]:.2f}\nr{int(ranks[i, j])}",
                             ha="center",
                             va="center",
-                            fontsize=7,
+                            fontsize=annotation_size,
                             color=INK if matrix[i, j] < 0.65 else "white",
                         )
             ax.set_xticks(
-                range(len(MODULE_ORDER)),
-                [name.replace("_proj", "") for name in MODULE_ORDER],
+                range(len(module_order)),
+                [name.replace("_proj", "") for name in module_order],
                 rotation=35,
                 ha="right",
             )
@@ -237,6 +275,138 @@ def _equal_fraction_heatmap(
     plt.close(fig)
 
 
+def _attention_depth_profiles(
+    summary_rows: list[dict[str, Any]], output: Path
+) -> None:
+    """Render full-depth attention trajectories without overcrowded cell labels."""
+
+    attention_rows = [
+        row for row in summary_rows if row["module_type"] in ATTENTION_ORDER
+    ]
+    if not attention_rows:
+        raise ValueError("attention depth profiles require q/k/v/o rows")
+    layers = sorted({int(row["layer"]) for row in attention_rows})
+    metrics = (
+        ("rho_func", 256, "Functional coverage @256"),
+        ("rho_func", 512, "Functional coverage @512"),
+        ("split_overlap", 512, "Split overlap @512"),
+    )
+    colors = {
+        module: color
+        for module, color in zip(
+            ATTENTION_ORDER, plt.cm.Blues(np.linspace(0.42, 0.95, len(ATTENTION_ORDER)))
+        )
+    }
+    line_styles = dict(zip(ATTENTION_ORDER, ("-", "--", "-.", ":")))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8.5), constrained_layout=True)
+    for source_index, source in enumerate(("X", "W")):
+        for metric_index, (metric, rank, title) in enumerate(metrics):
+            ax = axes[source_index, metric_index]
+            for module_type in ATTENTION_ORDER:
+                selected = sorted(
+                    (
+                        row
+                        for row in attention_rows
+                        if row["source"] == source
+                        and row["module_type"] == module_type
+                        and int(row["rank"]) == rank
+                    ),
+                    key=lambda row: int(row["layer"]),
+                )
+                if not selected:
+                    continue
+                ax.plot(
+                    [int(row["layer"]) for row in selected],
+                    [float(row[metric]) for row in selected],
+                    marker="o",
+                    markersize=2.8,
+                    linewidth=1.6,
+                    linestyle=line_styles[module_type],
+                    color=colors[module_type],
+                    label=module_type.replace("_proj", ""),
+                )
+            ax.set_ylim(0, 1.02)
+            ax.set_xlim(min(layers), max(layers))
+            tick_step = max(1, len(layers) // 8)
+            ticks = layers[::tick_step]
+            if ticks[-1] != layers[-1]:
+                ticks.append(layers[-1])
+            ax.set_xticks(ticks)
+            ax.set_xlabel("Decoder layer")
+            ax.set_ylabel("Coverage / overlap")
+            ax.set_title(f"{source} source — {title}", fontsize=11, fontweight="bold")
+            ax.legend(frameon=False, ncol=2, fontsize=8)
+            _style_axes(ax)
+    fig.suptitle(
+        "Full-depth attention Functional Gram profiles",
+        fontsize=16,
+        fontweight="bold",
+        color=INK,
+    )
+    fig.savefig(output, dpi=180, facecolor="white")
+    plt.close(fig)
+
+
+def _down_depth_profiles(
+    summary_rows: list[dict[str, Any]], output: Path
+) -> None:
+    """Render down-projection depth trajectories at fixed and fair ranks."""
+
+    down_rows = [row for row in summary_rows if row["module_type"] == "down_proj"]
+    if not down_rows:
+        raise ValueError("down depth profiles require down_proj rows")
+    layers = sorted({int(row["layer"]) for row in down_rows})
+    metrics = (
+        ("rho_func", "Functional coverage"),
+        ("rho_struct", "Structural coverage"),
+        ("split_overlap", "Split overlap"),
+    )
+    ranks = (256, 896, 1024)
+    colors = dict(zip(ranks, plt.cm.Blues(np.linspace(0.45, 0.95, len(ranks)))))
+    line_styles = dict(zip(ranks, ("--", "-", ":")))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8.5), constrained_layout=True)
+    for source_index, source in enumerate(("X", "W")):
+        for metric_index, (metric, title) in enumerate(metrics):
+            ax = axes[source_index, metric_index]
+            for rank in ranks:
+                selected = sorted(
+                    (
+                        row
+                        for row in down_rows
+                        if row["source"] == source and int(row["rank"]) == rank
+                    ),
+                    key=lambda row: int(row["layer"]),
+                )
+                if not selected:
+                    continue
+                ax.plot(
+                    [int(row["layer"]) for row in selected],
+                    [float(row[metric]) for row in selected],
+                    marker="o",
+                    markersize=3.2,
+                    linewidth=1.7,
+                    linestyle=line_styles[rank],
+                    color=colors[rank],
+                    label=f"rank {rank}",
+                )
+            ax.set_ylim(0, 1.02)
+            ax.set_xlim(min(layers), max(layers))
+            ax.set_xticks(layers)
+            ax.set_xlabel("Decoder layer")
+            ax.set_ylabel("Coverage / overlap")
+            ax.set_title(f"{source} source — {title}", fontsize=11, fontweight="bold")
+            ax.legend(frameon=False, fontsize=8)
+            _style_axes(ax)
+    fig.suptitle(
+        "Down-projection depth profiles",
+        fontsize=16,
+        fontweight="bold",
+        color=INK,
+    )
+    fig.savefig(output, dpi=180, facecolor="white")
+    plt.close(fig)
+
+
 def render_stage1_figures(
     artifact_dir: str | Path,
     summary_rows: list[dict[str, Any]],
@@ -246,6 +416,11 @@ def render_stage1_figures(
     output_dir.mkdir(parents=True, exist_ok=True)
     records = _load_curves(artifact_dir)
     outputs: dict[str, str] = {}
+    available_module_order = tuple(
+        module
+        for module in MODULE_ORDER
+        if any(row["module_type"] == module for row in records)
+    )
     definitions = (
         ("eigenvalues", "figure_A_eigenspectrum", "Normalized eigenvalue spectrum", "Eigenvalue share of total functional-Gram trace; log-log view", r"$\lambda_i / \sum_j \lambda_j$", True, ()),
         ("rho_struct", "figure_B_structural_coverage", "Cumulative structural coverage", "Share of functional-atom energy represented by the top-r eigenspace", r"$\rho_{struct}(r)$", False, (64, 128, 256, 512, 896)),
@@ -273,23 +448,36 @@ def render_stage1_figures(
         summary_rows,
         heatmap_path,
         rank=256,
-        module_order=MODULE_ORDER,
+        module_order=available_module_order,
         figure_title="Stage 1 layer/module heatmaps at rank 256",
     )
     outputs["figure_E_layer_module_heatmaps"] = str(heatmap_path)
-    qkvo_path = output_dir / "figure_F_qkvo_depth_heatmaps_rank512.png"
-    _heatmap_at_rank(
-        records,
-        summary_rows,
-        qkvo_path,
-        rank=512,
-        module_order=("q_proj", "k_proj", "v_proj", "o_proj"),
-        figure_title="Matched-depth q/k/v/o heatmaps at rank 512",
+    has_attention_rank512 = any(
+        row["module_type"] in ATTENTION_ORDER and int(row["rank"]) == 512
+        for row in summary_rows
     )
-    outputs["figure_F_qkvo_depth_heatmaps_rank512"] = str(qkvo_path)
+    if has_attention_rank512:
+        qkvo_path = output_dir / "figure_F_qkvo_depth_heatmaps_rank512.png"
+        _heatmap_at_rank(
+            records,
+            summary_rows,
+            qkvo_path,
+            rank=512,
+            module_order=ATTENTION_ORDER,
+            figure_title="Matched-depth q/k/v/o heatmaps at rank 512",
+        )
+        outputs["figure_F_qkvo_depth_heatmaps_rank512"] = str(qkvo_path)
     equal_fraction_path = output_dir / "figure_G_equal_fraction_heatmaps.png"
     _equal_fraction_heatmap(records, summary_rows, equal_fraction_path)
     outputs["figure_G_equal_fraction_heatmaps"] = str(equal_fraction_path)
+    if has_attention_rank512:
+        depth_profile_path = output_dir / "figure_I_attention_depth_profiles.png"
+        _attention_depth_profiles(summary_rows, depth_profile_path)
+        outputs["figure_I_attention_depth_profiles"] = str(depth_profile_path)
+    if any(row["module_type"] == "down_proj" for row in summary_rows):
+        down_profile_path = output_dir / "figure_J_down_depth_profiles.png"
+        _down_depth_profiles(summary_rows, down_profile_path)
+        outputs["figure_J_down_depth_profiles"] = str(down_profile_path)
     chart_map = {
         "surface": "static_matplotlib_png",
         "palette_policy": "single blue root plus neutral references",
