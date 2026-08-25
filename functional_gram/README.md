@@ -27,3 +27,14 @@ The runner is resumable. Use `--skip-collection` to reuse saved operands and
 are `stage1_summary.csv`, `stage1_gate_summary.json`, `validation.json`, source
 spectral artifacts, Figure A--E PNGs, and the technical report. Full combined
 Grams are included unless `--omit-full-gram` is supplied.
+
+For the post-gate matched-depth diagnostic, `--modules depth-control` captures
+q/k/v/o/gate/up/down at the early, middle, and final decoder layers. Add
+`--head-analysis` to split q/k/v weights into their exact contiguous
+`head_dim` row blocks. This writes per-head coverage, pairwise projector
+overlap, and aggregate-subspace capture under `head_analysis/`.
+
+Stage-1 summary ranks are dimension aware: K=4096 modules retain ranks through
+512, while large-K modules additionally report ranks 896 and 1024. The
+`equal_fraction_reference` row is 6.25% of K (rank 256 for K=4096 and rank 896
+for K=14336). The preregistered GO/NO-GO gate remains rank 256.

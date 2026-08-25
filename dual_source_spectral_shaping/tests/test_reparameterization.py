@@ -8,6 +8,7 @@ from dual_source_spectral_shaping.smooth_scaling import (
     apply_reparameterization,
     smoothquant_scale,
 )
+from dual_source_spectral_shaping.run_stage1_5 import _reparameterization_error
 from dual_source_spectral_shaping.tests.common import make_operands
 
 
@@ -20,4 +21,7 @@ class ReparameterizationTest(unittest.TestCase):
         self.assertLessEqual(float(scale.max()), 4.0)
         self.assertTrue(
             torch.allclose(x @ weight.T, scaled_x @ scaled_weight.T, rtol=2e-6, atol=2e-6)
+        )
+        self.assertLess(
+            _reparameterization_error(x, weight, scaled_x, scaled_weight), 2e-5
         )

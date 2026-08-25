@@ -51,6 +51,28 @@ def initial_cost_control_modules(num_layers: int) -> tuple[str, ...]:
     )
 
 
+def depth_control_modules(num_layers: int) -> tuple[str, ...]:
+    """Return all seven Linear types at matched early/middle/late depths."""
+
+    if num_layers < 3:
+        raise ValueError("at least three decoder layers are required")
+    layers = tuple(dict.fromkeys((0, num_layers // 2, num_layers - 1)))
+    local_names = (
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+    )
+    return tuple(
+        f"layers.{layer}.{local_name}"
+        for layer in layers
+        for local_name in local_names
+    )
+
+
 def all_linears_modules(num_layers: int) -> tuple[str, ...]:
     local_names = (
         "self_attn.q_proj",
@@ -98,7 +120,7 @@ def collect_decoder_operands(
     model_path: str | Path,
     wikitext_cache_dir: str | Path,
     output_dir: str | Path,
-    modules: Iterable[str] | None,
+    modules: Iterable[str] | str | None,
     selection_samples: int,
     holdout_samples: int,
     seqlen: int,
@@ -127,10 +149,20 @@ def collect_decoder_operands(
     dataset_digest = sha256_file(cache_dir / "wikitext-train.arrow")
     model, tokenizer = load_model(str(model_path))
     num_layers = len(model.model.layers)
-    targets = _validate_modules(
-        initial_cost_control_modules(num_layers) if modules is None else modules,
-        num_layers,
-    )
+    if modules is None:
+        requested_modules: Iterable[str] = initial_cost_control_modules(num_layers)
+    elif modules == "depth-control":
+        requested_modules = depth_control_modules(num_layers)
+    elif isinstance(modules, str):
+        raise ValueError(f"unknown module preset: {modules}")
+    else:
+        requested_modules = modules
+    targets = _validate_modules(requested_modules, num_layers)
+    config = model.config
+    hidden_size = int(getattr(config, "hidden_size"))
+    attention_heads = int(getattr(config, "num_attention_heads"))
+    key_value_heads = int(getattr(config, "num_key_value_heads", attention_heads))
+    head_dim = int(getattr(config, "head_dim", 0) or hidden_size // attention_heads)
     expected = {name: output_dir / _artifact_name(name) for name in targets}
     completed = {name for name, path in expected.items() if resume and path.is_file()}
     pending = set(targets) - completed
@@ -221,6 +253,13 @@ def collect_decoder_operands(
                 "layer": layer_index,
                 "K": int(module.in_features),
                 "out_features": int(module.out_features),
+                "attention_heads": (
+                    attention_heads if full_name.endswith("q_proj") else
+                    key_value_heads if full_name.endswith(("k_proj", "v_proj")) else None
+                ),
+                "head_dim": (
+                    head_dim if full_name.endswith(("q_proj", "k_proj", "v_proj")) else None
+                ),
                 "split_a": {"x": xa.cpu(), "qx": qxa.cpu(), "row_ids": ids_a},
                 "split_b": {"x": xb.cpu(), "qx": qxb.cpu(), "row_ids": ids_b},
                 "weight": weight.cpu(),
@@ -247,6 +286,14 @@ def collect_decoder_operands(
                     "split_manifest": split_manifest,
                 },
             }
+            if payload["attention_heads"] is not None and (
+                int(payload["attention_heads"]) * int(payload["head_dim"])
+                != int(module.out_features)
+            ):
+                raise ValueError(
+                    f"attention head metadata does not match {full_name}: "
+                    f"{payload['attention_heads']} x {payload['head_dim']} != {module.out_features}"
+                )
             torch.save(payload, expected[full_name])
             print(f"captured {full_name}: X={tuple(xa.shape)}, W={tuple(weight.shape)}", flush=True)
             del xa, xb, qxa, qxb, weight, qweight, payload

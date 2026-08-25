@@ -103,21 +103,25 @@ def _line_figure(
     plt.close(fig)
 
 
-def _heatmap(
+def _heatmap_at_rank(
     records: list[dict[str, Any]],
     summary_rows: list[dict[str, Any]],
     output: Path,
+    *,
+    rank: int,
+    module_order: tuple[str, ...],
+    figure_title: str,
 ) -> None:
     layers = sorted({int(row["layer"]) for row in records})
     lookup: dict[tuple[int, str, str, str], float] = {}
     for row in summary_rows:
-        if int(row["rank"]) == 256:
+        if int(row["rank"]) == rank:
             for metric in ("rho_func", "rho_struct", "split_overlap"):
                 lookup[(int(row["layer"]), row["module"], row["source"], metric)] = float(row[metric])
     metrics = (
-        ("rho_func", "Functional coverage at rank 256"),
-        ("rho_struct", "Structural coverage at rank 256"),
-        ("split_overlap", "Split overlap at rank 256"),
+        ("rho_func", f"Functional coverage at rank {rank}"),
+        ("rho_struct", f"Structural coverage at rank {rank}"),
+        ("split_overlap", f"Split overlap at rank {rank}"),
     )
     fig, axes = plt.subplots(2, 3, figsize=(16, 7.5), constrained_layout=True, squeeze=False)
     cmap = plt.cm.Blues.copy()
@@ -126,9 +130,9 @@ def _heatmap(
     for source_index, source in enumerate(("X", "W")):
         for metric_index, (metric, label) in enumerate(metrics):
             ax = axes[source_index, metric_index]
-            matrix = np.full((len(layers), len(MODULE_ORDER)), np.nan)
+            matrix = np.full((len(layers), len(module_order)), np.nan)
             for i, layer in enumerate(layers):
-                for j, module_type in enumerate(MODULE_ORDER):
+                for j, module_type in enumerate(module_order):
                     module_name = next(
                         (
                             row["module"]
@@ -144,7 +148,7 @@ def _heatmap(
                 for j in range(matrix.shape[1]):
                     if np.isfinite(matrix[i, j]):
                         ax.text(j, i, f"{matrix[i, j]:.2f}", ha="center", va="center", fontsize=8, color=INK if matrix[i, j] < 0.65 else "white")
-            ax.set_xticks(range(len(MODULE_ORDER)), [name.replace("_proj", "") for name in MODULE_ORDER], rotation=35, ha="right")
+            ax.set_xticks(range(len(module_order)), [name.replace("_proj", "") for name in module_order], rotation=35, ha="right")
             ax.set_yticks(range(len(layers)), layers)
             ax.set_xlabel("Linear module type")
             ax.set_ylabel("Layer")
@@ -152,7 +156,83 @@ def _heatmap(
             ax.tick_params(labelsize=8)
     assert image is not None
     fig.colorbar(image, ax=axes, location="right", shrink=0.82, label="Coverage / overlap")
-    fig.suptitle("Stage 1 layer/module heatmaps", fontsize=16, fontweight="bold", color=INK)
+    fig.suptitle(figure_title, fontsize=16, fontweight="bold", color=INK)
+    fig.savefig(output, dpi=180, facecolor="white")
+    plt.close(fig)
+
+
+def _equal_fraction_heatmap(
+    records: list[dict[str, Any]],
+    summary_rows: list[dict[str, Any]],
+    output: Path,
+) -> None:
+    """Compare every module at 6.25% of K (256/4096; 896/14336)."""
+
+    layers = sorted({int(row["layer"]) for row in records})
+    selected = [row for row in summary_rows if bool(row["equal_fraction_reference"])]
+    lookup = {
+        (int(row["layer"]), row["module"], row["source"]): row
+        for row in selected
+    }
+    metrics = (
+        ("rho_func", "Functional coverage at 6.25% of K"),
+        ("rho_struct", "Structural coverage at 6.25% of K"),
+        ("split_overlap", "Split overlap at 6.25% of K"),
+    )
+    fig, axes = plt.subplots(2, 3, figsize=(16, 7.5), constrained_layout=True)
+    cmap = plt.cm.Blues.copy()
+    cmap.set_bad("#ECEFF3")
+    image = None
+    for source_index, source in enumerate(("X", "W")):
+        for metric_index, (metric, title) in enumerate(metrics):
+            matrix = np.full((len(layers), len(MODULE_ORDER)), np.nan)
+            ranks = np.full_like(matrix, np.nan)
+            for i, layer in enumerate(layers):
+                for j, module_type in enumerate(MODULE_ORDER):
+                    module_name = next(
+                        (
+                            row["module"]
+                            for row in records
+                            if row["layer"] == layer and row["module_type"] == module_type
+                        ),
+                        None,
+                    )
+                    row = lookup.get((layer, module_name, source)) if module_name else None
+                    if row is not None:
+                        matrix[i, j] = float(row[metric])
+                        ranks[i, j] = int(row["rank"])
+            ax = axes[source_index, metric_index]
+            image = ax.imshow(matrix, vmin=0, vmax=1, cmap=cmap, aspect="auto")
+            for i in range(matrix.shape[0]):
+                for j in range(matrix.shape[1]):
+                    if np.isfinite(matrix[i, j]):
+                        ax.text(
+                            j,
+                            i,
+                            f"{matrix[i, j]:.2f}\nr{int(ranks[i, j])}",
+                            ha="center",
+                            va="center",
+                            fontsize=7,
+                            color=INK if matrix[i, j] < 0.65 else "white",
+                        )
+            ax.set_xticks(
+                range(len(MODULE_ORDER)),
+                [name.replace("_proj", "") for name in MODULE_ORDER],
+                rotation=35,
+                ha="right",
+            )
+            ax.set_yticks(range(len(layers)), layers)
+            ax.set_xlabel("Linear module type")
+            ax.set_ylabel("Layer")
+            ax.set_title(f"{source} source — {title}", fontsize=10, fontweight="bold")
+    assert image is not None
+    fig.colorbar(image, ax=axes, location="right", shrink=0.82, label="Coverage / overlap")
+    fig.suptitle(
+        "Stage 1 equal-rank-fraction heatmaps",
+        fontsize=16,
+        fontweight="bold",
+        color=INK,
+    )
     fig.savefig(output, dpi=180, facecolor="white")
     plt.close(fig)
 
@@ -168,9 +248,9 @@ def render_stage1_figures(
     outputs: dict[str, str] = {}
     definitions = (
         ("eigenvalues", "figure_A_eigenspectrum", "Normalized eigenvalue spectrum", "Eigenvalue share of total functional-Gram trace; log-log view", r"$\lambda_i / \sum_j \lambda_j$", True, ()),
-        ("rho_struct", "figure_B_structural_coverage", "Cumulative structural coverage", "Share of functional-atom energy represented by the top-r eigenspace", r"$\rho_{struct}(r)$", False, (64, 128, 256)),
-        ("rho_func", "figure_C_functional_coverage", "Cumulative summed functional-error coverage", "Share of the actual summed output error represented by the top-r modes", r"$\rho_{func}(r)$", False, (64, 128, 256)),
-        ("overlap", "figure_D_split_stability", "Calibration split subspace stability", "Projector overlap between disjoint WikiText2 split A and split B", "Overlap(r)", False, (128, 256)),
+        ("rho_struct", "figure_B_structural_coverage", "Cumulative structural coverage", "Share of functional-atom energy represented by the top-r eigenspace", r"$\rho_{struct}(r)$", False, (64, 128, 256, 512, 896)),
+        ("rho_func", "figure_C_functional_coverage", "Cumulative summed functional-error coverage", "Share of the actual summed output error represented by the top-r modes", r"$\rho_{func}(r)$", False, (64, 128, 256, 512, 896)),
+        ("overlap", "figure_D_split_stability", "Calibration split subspace stability", "Projector overlap between disjoint WikiText2 split A and split B", "Overlap(r)", False, (128, 256, 512, 896)),
     )
     for source in ("X", "W"):
         for field, stem, title, subtitle, ylabel, log_y, reference_ranks in definitions:
@@ -188,8 +268,28 @@ def render_stage1_figures(
             )
             outputs[f"{stem}_{source}"] = str(path)
     heatmap_path = output_dir / "figure_E_layer_module_heatmaps.png"
-    _heatmap(records, summary_rows, heatmap_path)
+    _heatmap_at_rank(
+        records,
+        summary_rows,
+        heatmap_path,
+        rank=256,
+        module_order=MODULE_ORDER,
+        figure_title="Stage 1 layer/module heatmaps at rank 256",
+    )
     outputs["figure_E_layer_module_heatmaps"] = str(heatmap_path)
+    qkvo_path = output_dir / "figure_F_qkvo_depth_heatmaps_rank512.png"
+    _heatmap_at_rank(
+        records,
+        summary_rows,
+        qkvo_path,
+        rank=512,
+        module_order=("q_proj", "k_proj", "v_proj", "o_proj"),
+        figure_title="Matched-depth q/k/v/o heatmaps at rank 512",
+    )
+    outputs["figure_F_qkvo_depth_heatmaps_rank512"] = str(qkvo_path)
+    equal_fraction_path = output_dir / "figure_G_equal_fraction_heatmaps.png"
+    _equal_fraction_heatmap(records, summary_rows, equal_fraction_path)
+    outputs["figure_G_equal_fraction_heatmaps"] = str(equal_fraction_path)
     chart_map = {
         "surface": "static_matplotlib_png",
         "palette_policy": "single blue root plus neutral references",

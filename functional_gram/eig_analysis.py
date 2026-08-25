@@ -128,7 +128,12 @@ def analyze_gram_randomized(
     rho_func = modal.cumsum(0) / one_g_one
     residual = aq @ rotations - vectors * values.float().reshape(1, -1)
     spectral_scale = max(float(values[0].item()), 1e-30)
-    relative = residual.norm(dim=0).double() / (values.abs() + spectral_scale * 1e-8)
+    # Near-null Ritz values otherwise turn harmless FP32 roundoff into an
+    # arbitrarily large relative residual.  Use a scale-relative floor while
+    # retaining the ordinary |Av-lambda v|/|lambda| diagnostic for meaningful
+    # modes.
+    denominator = values.abs().clamp_min(spectral_scale * 1e-6)
+    relative = residual.norm(dim=0).double() / denominator
     return EigenAnalysis(
         eigenvalues=values,
         eigenvectors=vectors,
