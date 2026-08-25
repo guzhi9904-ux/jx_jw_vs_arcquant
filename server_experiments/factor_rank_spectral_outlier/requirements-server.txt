@@ -1,0 +1,9 @@
+# Install the CUDA-compatible PyTorch build separately.
+transformers==4.44.0
+datasets==3.4.0
+numpy>=2,<3
+pandas>=2,<3
+matplotlib>=3.8,<4
+scipy>=1.11,<2
+pyarrow>=17
+safetensors>=0.4
