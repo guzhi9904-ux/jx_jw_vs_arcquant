@@ -485,8 +485,12 @@ def _reparameterization_error(
 ) -> float:
     rows = min(32, x.shape[0])
     outputs = min(64, weight.shape[0])
-    expected = x[:rows].float() @ weight[:outputs].float().T
-    actual = scaled_x[:rows].float() @ scaled_weight[:outputs].float().T
+    # This is an algebraic audit, not a throughput path.  FP32 CUDA matmul may
+    # use TF32 and report an O(1e-3) discrepancy even though the diagonal
+    # reparameterization is function preserving.  Accumulate in FP64 so the
+    # check measures scaling roundoff rather than TF32 operand truncation.
+    expected = x[:rows].double() @ weight[:outputs].double().T
+    actual = scaled_x[:rows].double() @ scaled_weight[:outputs].double().T
     return float((actual - expected).abs().max().item()) / max(
         float(expected.abs().max().item()), 1e-30
     )

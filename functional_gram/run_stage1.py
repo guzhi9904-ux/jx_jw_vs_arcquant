@@ -33,11 +33,29 @@ from functional_gram.eig_analysis import (  # noqa: E402
     analyze_gram,
     analyze_gram_randomized,
 )
+from functional_gram.head_analysis import run_head_analysis  # noqa: E402
 from functional_gram.plot_stage1 import render_stage1_figures  # noqa: E402
 from functional_gram.split_stability import projector_overlap_curve  # noqa: E402
 
 
-RANKS = (16, 32, 64, 128, 256, 512)
+BASE_RANKS = (16, 32, 64, 128, 256, 512)
+LARGE_K_RANKS = (896, 1024)
+
+
+def equal_fraction_rank(k: int) -> int:
+    """Rank matching the preregistered 256/4096 = 6.25% budget."""
+
+    if k <= 0:
+        raise ValueError("K must be positive")
+    return max(1, min(k, int(round(k / 16))))
+
+
+def summary_ranks_for_k(k: int) -> tuple[int, ...]:
+    ranks = {rank for rank in BASE_RANKS if rank <= k}
+    ranks.add(equal_fraction_rank(k))
+    if k > 4096:
+        ranks.update(rank for rank in LARGE_K_RANKS if rank <= k)
+    return tuple(sorted(ranks))
 
 
 def _default_wikitext_cache() -> Path:
@@ -65,7 +83,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Output directory; defaults to analysis/functional_gram/<model-name>",
     )
-    parser.add_argument("--modules", default="auto", help="auto or comma-separated layers.N.* names")
+    parser.add_argument(
+        "--modules",
+        default="auto",
+        help="auto, depth-control, or comma-separated layers.N.* names",
+    )
     parser.add_argument("--selection-samples", type=int, default=4)
     parser.add_argument("--holdout-samples", type=int, default=4)
     parser.add_argument("--seqlen", type=int, default=2048)
@@ -94,10 +116,21 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cpu-threads", type=int, default=0)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--skip-collection", action="store_true")
-    args = parser.parse_args(None if argv is None else list(argv))
-    args.modules = None if args.modules == "auto" else tuple(
-        item.strip() for item in args.modules.split(",") if item.strip()
+    parser.add_argument(
+        "--head-analysis",
+        action="store_true",
+        help="Analyze every exact head_dim-wide q/k/v head on the combined split",
     )
+    parser.add_argument("--head-oversample", type=int, default=16)
+    parser.add_argument("--head-power-iterations", type=int, default=1)
+    parser.add_argument("--head-overlap-rank", type=int, default=32)
+    args = parser.parse_args(None if argv is None else list(argv))
+    if args.modules == "auto":
+        args.modules = None
+    elif args.modules != "depth-control":
+        args.modules = tuple(
+            item.strip() for item in args.modules.split(",") if item.strip()
+        )
     if args.cpu_threads > 0:
         torch.set_num_threads(args.cpu_threads)
     if args.output_root is None:
@@ -243,7 +276,8 @@ def _analyze_one_source(
         "split_a": [(operands["split_a"]["x"], operands["split_a"]["qx"])],
         "split_b": [(operands["split_b"]["x"], operands["split_b"]["qx"])],
     }
-    max_rank = min(max(RANKS), k)
+    requested_ranks = summary_ranks_for_k(k)
+    max_rank = max(requested_ranks)
     split_payloads: dict[str, dict[str, Any]] = {}
     top_vectors: dict[str, torch.Tensor] = {}
     for split_index, split in enumerate(("split_a", "split_b")):
@@ -343,7 +377,7 @@ def _summary_rows(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         k = int(artifact["K"])
         combined = artifact["combined"]
         overlap = artifact["split_overlap_curve"]
-        for rank in RANKS:
+        for rank in summary_ranks_for_k(k):
             if rank > k or rank > overlap.numel():
                 continue
             rows.append(
@@ -354,6 +388,8 @@ def _summary_rows(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "source": artifact["source"],
                     "K": k,
                     "rank": rank,
+                    "rank_fraction": rank / k,
+                    "equal_fraction_reference": rank == equal_fraction_rank(k),
                     "rho_struct": float(combined["rho_struct_curve"][rank - 1].item()),
                     "rho_func": float(combined["rho_func_curve"][rank - 1].item()),
                     "rho_struct_split_a": float(artifact["split_a"]["rho_struct_curve"][rank - 1].item()),
@@ -431,7 +467,8 @@ def _gate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
-        "layer", "module", "module_type", "source", "K", "rank", "rho_struct",
+        "layer", "module", "module_type", "source", "K", "rank", "rank_fraction",
+        "equal_fraction_reference", "rho_struct",
         "rho_func", "effective_rank", "effective_rank_ratio", "split_overlap", "trace_G", "one_G_one",
         "rho_struct_split_a", "rho_struct_split_b", "rho_func_split_a", "rho_func_split_b",
         "spectral_method", "spectral_residual_max",
@@ -449,6 +486,7 @@ def _write_markdown_report(
     validation: dict[str, Any],
     figures: dict[str, str],
     model_label: str,
+    head_analysis: dict[str, Any] | None,
 ) -> None:
     rank256 = [row for row in rows if int(row["rank"]) == 256]
     by_source = {
@@ -499,6 +537,45 @@ def _write_markdown_report(
             f"| {row['layer']} | {row['module_type']} | {row['source']} | {float(row['rho_struct']):.4f} | "
             f"{float(row['rho_func']):.4f} | {float(row['split_overlap']):.4f} | {float(row['effective_rank_ratio']):.4f} |"
         )
+    rank512_qkvo = [
+        row
+        for row in rows
+        if int(row["rank"]) == 512
+        and row["module_type"] in {"q_proj", "k_proj", "v_proj", "o_proj"}
+    ]
+    lines.extend(
+        [
+            "",
+            "## 同层 q/k/v/o 的 rank-512 对照",
+            "",
+            "| Layer | Module | Source | rho_struct@512 | rho_func@512 | overlap@512 |",
+            "|---:|---|---|---:|---:|---:|",
+        ]
+    )
+    for row in rank512_qkvo:
+        lines.append(
+            f"| {row['layer']} | {row['module_type']} | {row['source']} | "
+            f"{float(row['rho_struct']):.4f} | {float(row['rho_func']):.4f} | "
+            f"{float(row['split_overlap']):.4f} |"
+        )
+    equal_fraction = [row for row in rows if bool(row["equal_fraction_reference"])]
+    lines.extend(
+        [
+            "",
+            "## 等 rank 比例（6.25% of K）对照",
+            "",
+            "普通 K=4096 模块使用 rank 256；K=14336 的 down_proj 使用 rank 896。",
+            "",
+            "| Layer | Module | Source | K | Rank | rho_struct | rho_func | overlap |",
+            "|---:|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in equal_fraction:
+        lines.append(
+            f"| {row['layer']} | {row['module_type']} | {row['source']} | {row['K']} | "
+            f"{row['rank']} | {float(row['rho_struct']):.4f} | "
+            f"{float(row['rho_func']):.4f} | {float(row['split_overlap']):.4f} |"
+        )
     lines.extend(
         [
             "",
@@ -510,11 +587,20 @@ def _write_markdown_report(
             "CSV 逐模块记录 exact eigendecomposition 或 randomized top-r solver 及其 Ritz residual。",
             "",
             f"Sanity/PSD 审计状态：**{validation['status']}**。逐模块检查 diagonal identity、`1^T G 1` functional norm identity 和显著负特征值。",
-            "",
-            "## 图表",
-            "",
         ]
     )
+    if head_analysis is not None:
+        lines.extend(
+            [
+                "",
+                "## Per-head 诊断",
+                "",
+                f"q/k/v 按连续 `head_dim` 行拆分；head Gram 求和恒等式与 randomized solver 审计状态："
+                f"**{head_analysis['status']}**。详细结果见 `head_analysis/head_spectrum_summary.csv` 与 "
+                "`head_analysis/head_module_summary.csv`。",
+            ]
+        )
+    lines.extend(["", "## 图表", ""])
     for name, figure in figures.items():
         relative = Path(figure).resolve().relative_to(path.parent.resolve()).as_posix()
         lines.append(f"- [{name}]({relative})")
@@ -523,8 +609,8 @@ def _write_markdown_report(
             "",
             "## 局限与下一步",
             "",
-            "本轮采用固定的初始成本控制范围：early/middle/late layer 分布，并确保 q/k/v/o/gate/up/down 每类至少一个 module。"
-            "因此门槛结论只对该预先固定目标集成立；如需升级为全层结论，应使用 `--modules` 扩展目标集并保持其它设置不变。",
+            "`auto` 范围采用预注册的 7-module early/middle/late 设计；`depth-control` 范围则在这三个深度同时"
+            "覆盖 q/k/v/o/gate/up/down，用于消除模块类型与层深度混杂。两者的 gate 不能混写。",
             "",
             "两个 source 均为 NO-GO，因此按预注册规则，本方向不进入 Stage 2 的 SVD-based support selection。",
         ]
@@ -590,6 +676,19 @@ def main(argv: Iterable[str] | None = None) -> None:
             del full_artifact
             gc.collect()
 
+    head_result: dict[str, Any] | None = None
+    if args.head_analysis:
+        head_result = run_head_analysis(
+            operand_paths,
+            artifact_dir=artifact_dir,
+            output_dir=output_root / "head_analysis",
+            device=args.device,
+            randomized_min_k=args.randomized_min_k,
+            oversample=args.head_oversample,
+            power_iterations=args.head_power_iterations,
+            overlap_rank=args.head_overlap_rank,
+        )
+
     rows = _summary_rows(source_artifacts)
     _write_csv(output_root / "stage1_summary.csv", rows)
     gate = _gate_summary(rows)
@@ -603,10 +702,12 @@ def main(argv: Iterable[str] | None = None) -> None:
         "status": "passed"
         if all(item["sanity"]["status"] == "passed" for item in source_artifacts)
         and maximum_solver_residual <= 0.5
+        and (head_result is None or head_result["status"] == "passed")
         else "failed",
         "source_artifacts": len(source_artifacts),
         "maximum_spectral_relative_residual": maximum_solver_residual,
         "spectral_relative_residual_tolerance": 0.5,
+        "head_analysis": head_result,
         "sanity_checks": [
             {
                 "module": item["module"],
@@ -623,6 +724,8 @@ def main(argv: Iterable[str] | None = None) -> None:
     }
     write_json(output_root / "validation.json", validation)
     figures = render_stage1_figures(artifact_dir, rows, figures_dir)
+    if head_result is not None:
+        figures["figure_H_per_head_diagnostics"] = head_result["outputs"]["figure"]
     _write_markdown_report(
         output_root / "STAGE1_REPORT.md",
         gate,
@@ -630,6 +733,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         validation,
         figures,
         Path(args.model).name,
+        head_result,
     )
     manifest = {
         "status": "complete" if validation["status"] == "passed" else "validation_failed",
@@ -643,6 +747,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             "validation": str(output_root / "validation.json"),
             "report": str(output_root / "STAGE1_REPORT.md"),
             "figures": figures,
+            "head_analysis": None if head_result is None else head_result["outputs"],
         },
     }
     # argparse fields are JSON-safe except a tuple/None, both handled by json.

@@ -14,7 +14,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from functional_gram.collect_stats import initial_cost_control_modules  # noqa: E402
+from functional_gram.collect_stats import (  # noqa: E402
+    depth_control_modules,
+    initial_cost_control_modules,
+)
 from functional_gram.model_inputs import model_weight_files  # noqa: E402
 
 
@@ -45,9 +48,13 @@ def main() -> None:
     num_layers = int(getattr(config, "num_hidden_layers"))
     hidden_size = int(getattr(config, "hidden_size"))
     intermediate_size = int(getattr(config, "intermediate_size"))
+    attention_heads = int(getattr(config, "num_attention_heads"))
+    key_value_heads = int(getattr(config, "num_key_value_heads", attention_heads))
+    head_dim = int(getattr(config, "head_dim", 0) or hidden_size // attention_heads)
     if num_layers < 3 or hidden_size < 1024 or intermediate_size <= hidden_size:
         raise ValueError("checkpoint does not look like the expected causal decoder")
     modules = initial_cost_control_modules(num_layers)
+    depth_modules = depth_control_modules(num_layers)
     maximum_k = max(hidden_size, intermediate_size)
     gram_gib = maximum_k * maximum_k * 4 / 2**30
     payload = {
@@ -58,7 +65,15 @@ def main() -> None:
         "num_hidden_layers": num_layers,
         "hidden_size": hidden_size,
         "intermediate_size": intermediate_size,
+        "attention_layout": {
+            "query_heads": attention_heads,
+            "key_value_heads": key_value_heads,
+            "head_dim": head_dim,
+            "q_projection_rows": attention_heads * head_dim,
+            "k_v_projection_rows": key_value_heads * head_dim,
+        },
         "target_modules": modules,
+        "depth_control_target_modules": depth_modules,
         "weight_files": [
             {"name": path.name, "bytes": path.stat().st_size} for path in weights
         ],
@@ -70,7 +85,11 @@ def main() -> None:
             "cuda_runtime": torch.version.cuda,
         },
         "largest_single_fp32_k_by_k_gram_gib": gram_gib,
-        "solver": "randomized top-512 for K >= 2048",
+        "solver": {
+            "K_le_4096": "randomized top-512",
+            "K_gt_4096": "randomized top-1024 (includes equal-fraction rank 896)",
+            "randomized_min_K": 2048,
+        },
     }
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
