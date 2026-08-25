@@ -93,7 +93,11 @@ def _render_summary_heatmap(
             "median aggregate capture @256",
         ),
     )
-    fig, axes = plt.subplots(2, 3, figsize=(16, 8), constrained_layout=True)
+    figure_height = max(8.0, 2.0 + 0.68 * len(layers))
+    annotation_size = 8 if len(layers) <= 12 else 6
+    fig, axes = plt.subplots(
+        2, 3, figsize=(16, figure_height), constrained_layout=True
+    )
     cmap = plt.cm.Blues.copy()
     cmap.set_bad("#ECEFF3")
     image = None
@@ -117,7 +121,7 @@ def _render_summary_heatmap(
                             f"{matrix[i, j]:.2f}",
                             ha="center",
                             va="center",
-                            fontsize=8,
+                            fontsize=annotation_size,
                             color="white" if matrix[i, j] >= 0.65 else "#22252A",
                         )
             ax.set_xticks(range(len(modules)), [name.replace("_proj", "") for name in modules])
@@ -143,18 +147,39 @@ def run_head_analysis(
     oversample: int,
     power_iterations: int,
     overlap_rank: int,
+    layers: Iterable[int] | None = None,
 ) -> dict[str, Any]:
     """Analyze every q/k/v row block as one attention head on the combined split."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    requested_layers = (
+        None
+        if layers is None
+        else tuple(sorted({int(layer) for layer in layers}))
+    )
+    if requested_layers is not None and (
+        not requested_layers or min(requested_layers) < 0
+    ):
+        raise ValueError("per-head layers must be nonempty and nonnegative")
     target_paths: list[Path] = []
+    available_layers: set[int] = set()
     for path in operand_paths:
         header = _load(path)
         if header["module_type"] in ATTENTION_MODULES:
-            target_paths.append(path)
+            layer = int(header["layer"])
+            available_layers.add(layer)
+            if requested_layers is None or layer in requested_layers:
+                target_paths.append(path)
         del header
+    if requested_layers is not None:
+        missing_layers = sorted(set(requested_layers) - available_layers)
+        if missing_layers:
+            raise ValueError(
+                f"per-head layers are absent from collected q/k/v operands: {missing_layers}"
+            )
     if not target_paths:
-        raise ValueError("head analysis requires q/k/v operands")
+        suffix = "" if requested_layers is None else f" at layers {requested_layers}"
+        raise ValueError(f"head analysis requires q/k/v operands{suffix}")
 
     work_device = torch.device(device)
     detail_rows: list[dict[str, Any]] = []
@@ -331,6 +356,8 @@ def run_head_analysis(
         else "failed",
         "module_source_pairs": len(module_rows),
         "head_rows": len(detail_rows),
+        "requested_layers": "all" if requested_layers is None else list(requested_layers),
+        "analyzed_layers": sorted({int(row["layer"]) for row in module_rows}),
         "head_sum_identity_relative_error_max": maximum_identity_error,
         "head_sum_identity_tolerance": 2e-4,
         "spectral_relative_residual_max": maximum_residual,

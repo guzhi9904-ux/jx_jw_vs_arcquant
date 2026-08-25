@@ -38,3 +38,11 @@ Stage-1 summary ranks are dimension aware: K=4096 modules retain ranks through
 512, while large-K modules additionally report ranks 896 and 1024. The
 `equal_fraction_reference` row is 6.25% of K (rank 256 for K=4096 and rank 896
 for K=14336). The preregistered GO/NO-GO gate remains rank 256.
+
+For the full-depth follow-up, `--modules attention-all` captures q/k/v/o at
+every decoder layer. `--head-analysis-layers 0,4,...` limits only the expensive
+per-head pass while retaining module-level coverage for every layer. The
+separate `--modules down-depth-scan` preset selects approximately eight uniform
+depth intervals plus the final `down_proj`; it reports both rank 896 and 1024
+for Llama-3.1-8B. These presets are diagnostic and do not modify the frozen
+seven-module Stage-1/1.5 verdict.
